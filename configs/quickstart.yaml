@@ -1,0 +1,68 @@
+seed: 13
+
+paths:
+  image_root: "/path/to/images"
+  metadata_csv: "/path/to/metadata.csv"
+  output_root: "outputs/quickstart"
+
+schema:
+  image_path_col: "Path"
+  split_col: "Split"
+  patient_id_col: "patient_id"
+  age_col: "age"
+  sex_col: "sex"
+  race_col: "race"
+  pathology_cols:
+    - "No Finding"
+    - "Cardiomegaly"
+    - "Edema"
+    - "Consolidation"
+    - "Atelectasis"
+    - "Pleural Effusion"
+  metadata_cols:
+    - "age"
+    - "sex"
+    - "race"
+    - "inpatient"
+    - "insurance"
+    - "language"
+    - "ethnicity"
+    - "zip_income_quartile"
+
+data:
+  allowed_splits: ["train", "valid", "test"]
+  validation_split_name: "valid"
+  test_split_name: "test"
+  uncertain_label_policy: "zero"
+  min_age: 18
+  max_age: 110
+  age_bins: [18, 40, 60, 120]
+
+features:
+  model_name: "StanfordAIMI/CheXagent-8b"
+  device: "cuda"
+  batch_size: 2
+  num_workers: 0
+  precision: "fp16"
+  pooling: "mean"
+
+sae:
+  latent_dim: 256
+  l1_lambda: 5.0e-4
+  learning_rate: 1.0e-3
+  weight_decay: 1.0e-6
+  batch_size: 64
+  epochs: 3
+  eval_every_epochs: 1
+
+probes:
+  learning_rate: 1.0e-3
+  weight_decay: 1.0e-5
+  batch_size: 128
+  epochs: 5
+
+fairness:
+  target_metric: "macro_auroc"
+  bootstrap_samples: 20
+  debias_strength: 1.0
+  threshold: 0.5

@@ -1,0 +1,76 @@
+seed: 13
+
+paths:
+  image_root: "/path/to/chexpert_plus/images"
+  metadata_csv: "/path/to/chexpert_plus/metadata.csv"
+  output_root: "outputs/default"
+
+schema:
+  image_path_col: "Path"
+  split_col: "Split"
+  patient_id_col: "patient_id"
+  age_col: "age"
+  sex_col: "sex"
+  race_col: "race"
+  pathology_cols:
+    - "No Finding"
+    - "Enlarged Cardiomediastinum"
+    - "Cardiomegaly"
+    - "Lung Opacity"
+    - "Lung Lesion"
+    - "Edema"
+    - "Consolidation"
+    - "Pneumonia"
+    - "Atelectasis"
+    - "Pneumothorax"
+    - "Pleural Effusion"
+    - "Pleural Other"
+    - "Fracture"
+    - "Support Devices"
+  metadata_cols:
+    - "age"
+    - "sex"
+    - "race"
+    - "ethnicity"
+    - "insurance"
+    - "language"
+    - "zip_income_quartile"
+    - "inpatient"
+
+data:
+  allowed_splits: ["train", "valid", "test"]
+  validation_split_name: "valid"
+  test_split_name: "test"
+  uncertain_label_policy: "zero"
+  min_age: 18
+  max_age: 110
+  age_bins: [18, 35, 50, 65, 80, 120]
+
+features:
+  model_name: "StanfordAIMI/CheXagent-8b"
+  device: "cuda"
+  batch_size: 8
+  num_workers: 4
+  precision: "fp16"
+  pooling: "mean"
+
+sae:
+  latent_dim: 2048
+  l1_lambda: 1.0e-4
+  learning_rate: 1.0e-3
+  weight_decay: 1.0e-6
+  batch_size: 512
+  epochs: 40
+  eval_every_epochs: 5
+
+probes:
+  learning_rate: 1.0e-3
+  weight_decay: 1.0e-5
+  batch_size: 1024
+  epochs: 30
+
+fairness:
+  target_metric: "macro_auroc"
+  bootstrap_samples: 200
+  debias_strength: 1.0
+  threshold: 0.5
