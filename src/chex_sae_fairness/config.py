@@ -12,6 +12,7 @@ class PathsConfig:
     image_root: str
     metadata_csv: str
     output_root: str
+    chexbert_labels_json: str | None = None
 
 
 @dataclass(slots=True)

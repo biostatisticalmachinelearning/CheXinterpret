@@ -7,7 +7,7 @@ import numpy as np
 import torch
 
 from chex_sae_fairness.config import ExperimentConfig
-from chex_sae_fairness.data.chexpert_plus import build_manifest, save_manifest
+from chex_sae_fairness.data.chexpert_plus import audit_png_layout, build_manifest, save_manifest
 from chex_sae_fairness.data.feature_cache import load_or_create_feature_bundle
 from chex_sae_fairness.models.chexagent_features import load_feature_bundle
 from chex_sae_fairness.pipeline import run_full_study
@@ -127,6 +127,35 @@ def run_sae_sweep_cli() -> None:
     print("SAE sweep finished.")
     print(f"Summary JSON: {summary['output_dir']}/summary.json")
     print(f"Summary CSV: {summary['summary_csv']}")
+
+
+def audit_data_cli() -> None:
+    parser = argparse.ArgumentParser(description="Audit PNG path resolution and metadata wiring")
+    parser.add_argument("--config", required=True, help="Path to YAML config")
+    parser.add_argument("--sample-size", type=int, default=2000, help="Number of rows to sample")
+    args = parser.parse_args()
+
+    cfg = ExperimentConfig.from_yaml(args.config)
+    report = audit_png_layout(cfg, sample_size=args.sample_size)
+
+    print("Dataset audit summary:")
+    print(f"  Total metadata rows: {report['n_total_rows']}")
+    print(f"  Sampled rows: {report['n_sampled']}")
+    print(f"  Resolved image paths: {report['n_resolved']}")
+    print(f"  Resolve rate: {report['resolve_rate']:.4f}")
+    print(f"  image_root: {report['image_root']}")
+    print(f"  has train/: {report['has_train_dir']}")
+    print(f"  has PNG/train/: {report['has_png_train_dir']}")
+    if report["png_chunk_zips_in_root"] or report["png_chunk_zips_in_png_dir"]:
+        print("  Detected PNG zip chunks (extract before training):")
+        for name in report["png_chunk_zips_in_root"]:
+            print(f"    root/{name}")
+        for name in report["png_chunk_zips_in_png_dir"]:
+            print(f"    PNG/{name}")
+    if report["unresolved_examples"]:
+        print("  Example unresolved metadata paths:")
+        for value in report["unresolved_examples"]:
+            print(f"    - {value}")
 
 
 if __name__ == "__main__":

@@ -1,17 +1,18 @@
 seed: 13
 
 paths:
-  image_root: "/path/to/chexpert_plus/images"
-  metadata_csv: "/path/to/chexpert_plus/metadata.csv"
+  image_root: "/path/to/chexpert_plus"
+  metadata_csv: "/path/to/chexpert_plus/df_chexpert_plus_240401.csv"
+  chexbert_labels_json: "/path/to/chexpert_plus/chexbert_labels.zip"
   output_root: "outputs/default"
 
 schema:
-  image_path_col: "Path"
-  split_col: "Split"
+  image_path_col: "path_to_image"
+  split_col: "split"
   patient_id_col: "patient_id"
-  age_col: "age"
-  sex_col: "sex"
-  race_col: "race"
+  age_col: "patient_age"
+  sex_col: "patient_sex"
+  race_col: "patient_race"
   pathology_cols:
     - "No Finding"
     - "Enlarged Cardiomediastinum"
@@ -28,14 +29,14 @@ schema:
     - "Fracture"
     - "Support Devices"
   metadata_cols:
-    - "age"
-    - "sex"
-    - "race"
-    - "ethnicity"
-    - "insurance"
-    - "language"
-    - "zip_income_quartile"
-    - "inpatient"
+    - "patient_age"
+    - "patient_sex"
+    - "patient_race"
+    - "patient_ethnicity"
+    - "patient_insurance_type"
+    - "patient_primary_language"
+    - "split"
+    - "patient_id"
 
 data:
   allowed_splits: ["train", "valid", "test"]

@@ -37,6 +37,7 @@ chex-extract-features = "chex_sae_fairness.cli:extract_features_cli"
 chex-train-sae = "chex_sae_fairness.cli:train_sae_cli"
 chex-run-study = "chex_sae_fairness.cli:run_study_cli"
 chex-run-sae-sweep = "chex_sae_fairness.cli:run_sae_sweep_cli"
+chex-audit-data = "chex_sae_fairness.cli:audit_data_cli"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

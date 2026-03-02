@@ -45,11 +45,25 @@ pip install -e .
 
 Update `configs/default.yaml` with your local paths and schema:
 
-- `paths.image_root`: root directory of CheXpert Plus image files.
-- `paths.metadata_csv`: CSV with split, image path, pathology labels, and metadata.
-- `schema.pathology_cols`: should match your 14 pathology columns.
-- `schema.metadata_cols`: your 8 metadata columns.
-- `schema.split_col` values should include train/valid/test names configured under `data`.
+- `paths.image_root`: directory that contains extracted PNG images.
+- `paths.metadata_csv`: `df_chexpert_plus_240401.csv`.
+- `paths.chexbert_labels_json`: either `chexbert_labels/findings_fixed.json` or `chexbert_labels.zip`.
+- `schema.image_path_col`: usually `path_to_image`.
+- `schema.pathology_cols`: should match your 14 pathology columns from CheXbert labels.
+- `schema.metadata_cols`: metadata columns from the CSV.
+- `schema.split_col`: can be inferred from `path_to_image` if missing.
+
+CheXpert Plus PNG layout (official examples) uses relative image paths like:
+
+- `train/patientXXXX/studyY/view1_frontal.jpg`
+- `valid/patientXXXX/studyY/view1_frontal.jpg`
+
+You only need one image modality for this pipeline. If using PNG:
+
+- extract `png_chexpert_plus_chunk_*.zip`
+- set `paths.image_root` to a directory containing either `train/` and `valid/`, or `PNG/train/` and `PNG/valid/`
+
+When pathology columns are not present in the CSV, the manifest builder will merge them automatically from `paths.chexbert_labels_json` using `path_to_image`.
 
 `uncertain_label_policy` supports:
 
@@ -63,6 +77,12 @@ End-to-end:
 
 ```bash
 chex-run-study --config configs/default.yaml
+```
+
+Before first run, audit your metadata/path wiring:
+
+```bash
+chex-audit-data --config configs/default.yaml --sample-size 3000
 ```
 
 Modular execution:
