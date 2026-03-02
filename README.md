@@ -62,6 +62,8 @@ You only need one image modality for this pipeline. If using PNG:
 
 - extract `png_chexpert_plus_chunk_*.zip`
 - set `paths.image_root` to a directory containing either `train/` and `valid/`, or `PNG/train/` and `PNG/valid/`
+- `val/` is accepted and normalized to `valid`
+- extracted chunk directories like `png_chexpert_plus_chunk_0/PNG/...` are also scanned automatically
 
 When pathology columns are not present in the CSV, the manifest builder will merge them automatically from `paths.chexbert_labels_json` using `path_to_image`.
 

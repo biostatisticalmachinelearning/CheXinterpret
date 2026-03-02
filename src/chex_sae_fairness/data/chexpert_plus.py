@@ -28,11 +28,13 @@ def build_manifest(cfg: ExperimentConfig) -> ManifestBuildResult:
 
     frame = _maybe_merge_pathology_labels(frame, cfg)
     frame = _derive_split_column_if_missing(frame, cfg)
+    frame = _normalize_split_values(frame, cfg)
     frame = _derive_patient_id_if_missing(frame, cfg)
 
     _ensure_columns(frame, _required_columns(cfg))
 
-    frame = frame.loc[frame[cfg.schema.split_col].isin(cfg.data.allowed_splits)].copy()
+    allowed_splits = {_canonicalize_split_name(v) for v in cfg.data.allowed_splits}
+    frame = frame.loc[frame[cfg.schema.split_col].isin(allowed_splits)].copy()
     frame[cfg.schema.age_col] = pd.to_numeric(frame[cfg.schema.age_col], errors="coerce")
     frame = frame.loc[
         (frame[cfg.schema.age_col] >= cfg.data.min_age) & (frame[cfg.schema.age_col] <= cfg.data.max_age)
@@ -41,8 +43,9 @@ def build_manifest(cfg: ExperimentConfig) -> ManifestBuildResult:
     frame = _apply_uncertain_policy(frame, cfg)
 
     image_root = Path(cfg.paths.image_root).resolve()
+    search_roots = _infer_png_search_roots(image_root)
     frame["image_path"] = frame[cfg.schema.image_path_col].apply(
-        lambda p: _resolve_png_image_path(str(p), image_root)
+        lambda p: _resolve_png_image_path(str(p), search_roots)
     )
 
     age_bin_labels = _age_bin_labels(cfg.data.age_bins)
@@ -99,8 +102,14 @@ def audit_png_layout(cfg: ExperimentConfig, sample_size: int = 2000) -> dict[str
     sampled = path_series.sample(min(sample_size, len(path_series)), random_state=13)
 
     image_root = Path(cfg.paths.image_root).resolve()
-    resolved = sampled.apply(lambda p: _resolve_png_image_path(p, image_root))
+    search_roots = _infer_png_search_roots(image_root)
+    resolved = sampled.apply(lambda p: _resolve_png_image_path(p, search_roots))
     success_mask = resolved.notna()
+
+    chunk_dirs = sorted([p.name for p in image_root.glob("png_chexpert_plus_chunk_*")])
+    png_subdir = image_root / "PNG"
+    if png_subdir.exists():
+        chunk_dirs.extend(sorted([f"PNG/{p.name}" for p in png_subdir.glob("png_chexpert_plus_chunk_*")]))
 
     unresolved_examples = sampled.loc[~success_mask].head(10).tolist()
     return {
@@ -111,7 +120,10 @@ def audit_png_layout(cfg: ExperimentConfig, sample_size: int = 2000) -> dict[str
         "unresolved_examples": unresolved_examples,
         "image_root": str(image_root),
         "has_train_dir": bool((image_root / "train").exists()),
+        "has_val_dir": bool((image_root / "val").exists()),
         "has_png_train_dir": bool((image_root / "PNG" / "train").exists()),
+        "has_png_val_dir": bool((image_root / "PNG" / "val").exists()),
+        "chunk_dirs_detected": chunk_dirs,
         "png_chunk_zips_in_root": sorted([p.name for p in image_root.glob("png_chexpert_plus_chunk_*.zip")]),
         "png_chunk_zips_in_png_dir": sorted(
             [p.name for p in (image_root / "PNG").glob("png_chexpert_plus_chunk_*.zip")]
@@ -289,6 +301,18 @@ def _derive_split_column_if_missing(frame: pd.DataFrame, cfg: ExperimentConfig) 
     return frame
 
 
+def _normalize_split_values(frame: pd.DataFrame, cfg: ExperimentConfig) -> pd.DataFrame:
+    split_col = cfg.schema.split_col
+    if split_col not in frame.columns:
+        return frame
+
+    frame = frame.copy()
+    frame[split_col] = (
+        frame[split_col].astype(str).str.strip().str.lower().apply(_canonicalize_split_name)
+    )
+    return frame
+
+
 def _derive_patient_id_if_missing(frame: pd.DataFrame, cfg: ExperimentConfig) -> pd.DataFrame:
     if cfg.schema.patient_id_col in frame.columns:
         return frame
@@ -302,8 +326,9 @@ def _derive_patient_id_if_missing(frame: pd.DataFrame, cfg: ExperimentConfig) ->
 def _derive_split_from_path(raw: str) -> str:
     parts = [part.lower() for part in Path(raw).parts]
     for part in parts:
-        if part in {"train", "valid", "test"}:
-            return part
+        canonical = _canonicalize_split_name(part)
+        if canonical in {"train", "valid", "test"}:
+            return canonical
     return "unknown"
 
 
@@ -336,7 +361,7 @@ def _age_bin_labels(age_bins: list[int]) -> list[str]:
     return [f"{age_bins[i]}-{age_bins[i + 1] - 1}" for i in range(len(age_bins) - 1)]
 
 
-def _resolve_png_image_path(raw_path: str, image_root: Path) -> str | None:
+def _resolve_png_image_path(raw_path: str, image_root: Path | list[Path]) -> str | None:
     raw = raw_path.strip()
     if not raw or raw.lower() == "nan":
         return None
@@ -360,8 +385,9 @@ def _resolve_png_image_path(raw_path: str, image_root: Path) -> str | None:
     )
     if split_index is not None and split_index > 0:
         variants.append(Path(*parts[split_index:]))
+    variants.extend(_split_alias_variants(variants))
 
-    candidate_bases = [image_root, image_root / "PNG"]
+    candidate_bases = image_root if isinstance(image_root, list) else _infer_png_search_roots(image_root)
     suffixes_to_try = []
 
     current_suffix = base_rel.suffix.lower()
@@ -398,18 +424,78 @@ def _raise_zero_rows_error(image_root: Path) -> None:
     png_dir = image_root / "PNG"
     root_zips = list(image_root.glob("png_chexpert_plus_chunk_*.zip"))
     png_zips = list(png_dir.glob("png_chexpert_plus_chunk_*.zip")) if png_dir.exists() else []
+    chunk_dirs = list(image_root.glob("png_chexpert_plus_chunk_*"))
+    chunk_dirs_in_png = (
+        list((image_root / "PNG").glob("png_chexpert_plus_chunk_*"))
+        if (image_root / "PNG").exists()
+        else []
+    )
 
     hints: list[str] = []
     if root_zips or png_zips:
         hints.append(
             "Detected PNG chunk zip files. Extract `png_chexpert_plus_chunk_*.zip` before building manifest."
         )
+    if chunk_dirs or chunk_dirs_in_png:
+        hints.append(
+            "Detected extracted chunk directories. The loader searches inside "
+            "`png_chexpert_plus_chunk_*/` and `png_chexpert_plus_chunk_*/PNG/`."
+        )
 
     hints.append(
         "Expected relative image paths like `train/patient.../study.../view1_frontal.jpg` from `path_to_image`."
     )
     hints.append(
-        "Set `paths.image_root` to a directory where either `train/` exists directly or `PNG/train/` exists."
+        "Set `paths.image_root` to a directory where `train/` or `val/` exists directly, "
+        "or where `PNG/train/` or `PNG/val/` exists."
     )
 
     raise ValueError("No rows remained after resolving PNG image paths. " + " ".join(hints))
+
+
+def _infer_png_search_roots(image_root: Path | list[Path]) -> list[Path]:
+    if isinstance(image_root, list):
+        initial_roots = [Path(p) for p in image_root]
+    else:
+        root = Path(image_root)
+        initial_roots = [root, root / "PNG"]
+        for base in [root, root / "PNG"]:
+            if not base.exists():
+                continue
+            for chunk_dir in sorted(base.glob("png_chexpert_plus_chunk_*")):
+                initial_roots.append(chunk_dir)
+                initial_roots.append(chunk_dir / "PNG")
+
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for candidate in initial_roots:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(candidate)
+    return deduped
+
+
+def _split_alias_variants(paths: list[Path]) -> list[Path]:
+    variants: list[Path] = []
+    for path in paths:
+        parts = list(path.parts)
+        for idx, part in enumerate(parts):
+            lower = part.lower()
+            if lower == "valid":
+                swapped = parts.copy()
+                swapped[idx] = "val"
+                variants.append(Path(*swapped))
+            elif lower == "val":
+                swapped = parts.copy()
+                swapped[idx] = "valid"
+                variants.append(Path(*swapped))
+    return variants
+
+
+def _canonicalize_split_name(name: str) -> str:
+    value = str(name).strip().lower()
+    if value in {"val", "validation", "dev"}:
+        return "valid"
+    return value

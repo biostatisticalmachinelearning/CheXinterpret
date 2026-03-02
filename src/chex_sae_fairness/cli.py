@@ -145,7 +145,13 @@ def audit_data_cli() -> None:
     print(f"  Resolve rate: {report['resolve_rate']:.4f}")
     print(f"  image_root: {report['image_root']}")
     print(f"  has train/: {report['has_train_dir']}")
+    print(f"  has val/: {report['has_val_dir']}")
     print(f"  has PNG/train/: {report['has_png_train_dir']}")
+    print(f"  has PNG/val/: {report['has_png_val_dir']}")
+    if report["chunk_dirs_detected"]:
+        print("  Detected extracted chunk directories:")
+        for name in report["chunk_dirs_detected"][:20]:
+            print(f"    - {name}")
     if report["png_chunk_zips_in_root"] or report["png_chunk_zips_in_png_dir"]:
         print("  Detected PNG zip chunks (extract before training):")
         for name in report["png_chunk_zips_in_root"]:
