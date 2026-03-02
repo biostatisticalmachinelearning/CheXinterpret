@@ -7,14 +7,11 @@ import numpy as np
 import torch
 
 from chex_sae_fairness.config import ExperimentConfig
-from chex_sae_fairness.data.chexpert_plus import build_manifest, load_manifest, save_manifest
-from chex_sae_fairness.models.chexagent_features import (
-    CheXagentVisionFeatureExtractor,
-    FeatureExtractionConfig,
-    load_feature_bundle,
-    save_feature_bundle,
-)
+from chex_sae_fairness.data.chexpert_plus import build_manifest, save_manifest
+from chex_sae_fairness.data.feature_cache import load_or_create_feature_bundle
+from chex_sae_fairness.models.chexagent_features import load_feature_bundle
 from chex_sae_fairness.pipeline import run_full_study
+from chex_sae_fairness.sweep import run_sae_sweep
 from chex_sae_fairness.training.train_sae import train_sae_model
 from chex_sae_fairness.utils.io import write_json
 from chex_sae_fairness.utils.repro import seed_everything
@@ -38,52 +35,21 @@ def prepare_manifest_cli() -> None:
 def extract_features_cli() -> None:
     parser = argparse.ArgumentParser(description="Extract CheXagent vision features")
     parser.add_argument("--config", required=True, help="Path to YAML config")
-    parser.add_argument(
-        "--build-manifest-if-missing",
-        action="store_true",
-        help="Build manifest automatically when missing",
-    )
+    parser.add_argument("--force", action="store_true", help="Recompute features even if cache exists")
     args = parser.parse_args()
 
     cfg = ExperimentConfig.from_yaml(args.config)
     cfg.ensure_output_dirs()
 
-    manifest_path = cfg.manifest_path
-    if not manifest_path.exists():
-        if not args.build_manifest_if_missing:
-            raise FileNotFoundError(
-                f"Manifest not found at {manifest_path}. Run chex-prepare-manifest first "
-                "or pass --build-manifest-if-missing."
-            )
-        result = build_manifest(cfg)
-        save_manifest(result.manifest, manifest_path)
-
-    manifest = load_manifest(manifest_path)
-
-    extractor = CheXagentVisionFeatureExtractor(
-        FeatureExtractionConfig(
-            model_name=cfg.features.model_name,
-            device=cfg.features.device,
-            batch_size=cfg.features.batch_size,
-            num_workers=cfg.features.num_workers,
-            precision=cfg.features.precision,
-            pooling=cfg.features.pooling,
-        )
+    feature_result = load_or_create_feature_bundle(
+        cfg,
+        force_recompute=args.force or cfg.features.force_recompute,
     )
-
-    features = extractor.extract_from_manifest(manifest)
-    save_feature_bundle(
-        output_path=str(cfg.feature_path),
-        features=features,
-        manifest=manifest,
-        split_col=cfg.schema.split_col,
-        pathology_cols=cfg.schema.pathology_cols,
-        metadata_cols=cfg.schema.metadata_cols,
-        age_col=cfg.schema.age_col,
-    )
+    features = feature_result.bundle["features"]
 
     print(f"Features saved: {cfg.feature_path}")
     print(f"Feature shape: {features.shape}")
+    print(f"Used cache: {feature_result.used_cache}")
 
 
 def train_sae_cli() -> None:
@@ -118,6 +84,8 @@ def train_sae_cli() -> None:
             "state_dict": output.model.state_dict(),
             "input_dim": int(x.shape[1]),
             "latent_dim": int(cfg.sae.latent_dim),
+            "variant": str(cfg.sae.variant),
+            "topk_k": int(cfg.sae.topk_k),
         },
         cfg.sae_checkpoint_path,
     )
@@ -138,6 +106,27 @@ def run_study_cli() -> None:
     run_full_study(args.config)
     print("Study finished.")
     print(f"Report path: {cfg.study_metrics_path}")
+
+
+def run_sae_sweep_cli() -> None:
+    parser = argparse.ArgumentParser(description="Run a multi-run SAE benchmark and comparison plots")
+    parser.add_argument("--base-config", required=True, help="Path to base experiment YAML config")
+    parser.add_argument("--sweep-config", required=True, help="Path to sweep YAML with SAE runs")
+    parser.add_argument(
+        "--force-features",
+        action="store_true",
+        help="Recompute CheXagent features even if cache exists",
+    )
+    args = parser.parse_args()
+
+    summary = run_sae_sweep(
+        base_config_path=args.base_config,
+        sweep_config_path=args.sweep_config,
+        force_recompute_features=args.force_features,
+    )
+    print("SAE sweep finished.")
+    print(f"Summary JSON: {summary['output_dir']}/summary.json")
+    print(f"Summary CSV: {summary['summary_csv']}")
 
 
 if __name__ == "__main__":

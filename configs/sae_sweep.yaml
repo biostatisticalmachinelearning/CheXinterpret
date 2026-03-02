@@ -1,0 +1,34 @@
+output_dir: "outputs/default/sae_sweep"
+
+runs:
+  - name: "l1_latent1024_l1e4"
+    sae:
+      variant: "l1"
+      latent_dim: 1024
+      l1_lambda: 1.0e-4
+      epochs: 30
+      batch_size: 512
+
+  - name: "l1_latent2048_l1e4"
+    sae:
+      variant: "l1"
+      latent_dim: 2048
+      l1_lambda: 1.0e-4
+      epochs: 40
+      batch_size: 512
+
+  - name: "topk_latent2048_k64"
+    sae:
+      variant: "topk"
+      latent_dim: 2048
+      topk_k: 64
+      epochs: 40
+      batch_size: 512
+
+  - name: "topk_latent4096_k64"
+    sae:
+      variant: "topk"
+      latent_dim: 4096
+      topk_k: 64
+      epochs: 40
+      batch_size: 512

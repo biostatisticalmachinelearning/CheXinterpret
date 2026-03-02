@@ -82,6 +82,78 @@ def reconstruction_metrics(x_true: np.ndarray, x_recon: np.ndarray) -> dict[str,
     }
 
 
+def summarize_latent_correlations(
+    z: np.ndarray,
+    y_pathology: np.ndarray,
+    pathology_cols: list[str],
+    metadata: pd.DataFrame,
+    metadata_cols: list[str],
+) -> dict[str, object]:
+    rows: list[dict[str, object]] = []
+
+    for idx, concept in enumerate(pathology_cols):
+        score, latent_idx = _max_abs_corr(z, y_pathology[:, idx].astype(float))
+        rows.append(
+            {
+                "concept": concept,
+                "concept_type": "pathology",
+                "max_abs_corr": score,
+                "latent_index": latent_idx,
+            }
+        )
+
+    for concept in metadata_cols:
+        series = metadata[concept]
+        if _is_numeric_series(series):
+            numeric = pd.to_numeric(series, errors="coerce").to_numpy(dtype=float)
+            score, latent_idx = _max_abs_corr(z, numeric)
+            rows.append(
+                {
+                    "concept": concept,
+                    "concept_type": "metadata_numeric",
+                    "max_abs_corr": score,
+                    "latent_index": latent_idx,
+                }
+            )
+            continue
+
+        values = series.astype(str).to_numpy()
+        cats = sorted(np.unique(values).tolist())
+        best_score = float("nan")
+        best_latent = -1
+        best_class = ""
+        for cat in cats:
+            binary = (values == cat).astype(float)
+            score, latent_idx = _max_abs_corr(z, binary)
+            if np.isnan(score):
+                continue
+            if np.isnan(best_score) or score > best_score:
+                best_score = score
+                best_latent = latent_idx
+                best_class = cat
+
+        rows.append(
+            {
+                "concept": concept,
+                "concept_type": "metadata_categorical",
+                "max_abs_corr": best_score,
+                "latent_index": best_latent,
+                "winning_class": best_class,
+            }
+        )
+
+    valid_rows = [r for r in rows if not np.isnan(r["max_abs_corr"])]
+    path_scores = [r["max_abs_corr"] for r in valid_rows if r["concept_type"] == "pathology"]
+    meta_scores = [r["max_abs_corr"] for r in valid_rows if r["concept_type"].startswith("metadata")]
+
+    return {
+        "mean_pathology_max_abs_corr": float(np.mean(path_scores)) if path_scores else float("nan"),
+        "mean_metadata_max_abs_corr": float(np.mean(meta_scores)) if meta_scores else float("nan"),
+        "num_valid_concepts": len(valid_rows),
+        "concepts": rows,
+    }
+
+
 def _binary_probe(
     z_train: np.ndarray,
     z_test: np.ndarray,
@@ -195,3 +267,33 @@ def _is_numeric_series(series: pd.Series) -> bool:
         return True
     numeric = pd.to_numeric(series, errors="coerce")
     return numeric.notna().mean() > 0.95
+
+
+def _max_abs_corr(z: np.ndarray, target: np.ndarray, eps: float = 1e-8) -> tuple[float, int]:
+    if z.size == 0 or target.size == 0:
+        return float("nan"), -1
+
+    valid_mask = np.isfinite(target)
+    if valid_mask.sum() < 3:
+        return float("nan"), -1
+
+    z_valid = z[valid_mask]
+    target_valid = target[valid_mask]
+    target_centered = target_valid - target_valid.mean()
+    target_std = target_centered.std()
+    if target_std < eps:
+        return float("nan"), -1
+
+    z_centered = z_valid - z_valid.mean(axis=0, keepdims=True)
+    z_std = z_centered.std(axis=0)
+    active = z_std > eps
+    if not np.any(active):
+        return float("nan"), -1
+
+    corr = np.zeros(z.shape[1], dtype=float)
+    numer = (z_centered[:, active] * target_centered[:, None]).mean(axis=0)
+    denom = (z_std[active] * target_std) + eps
+    corr[active] = np.abs(numer / denom)
+
+    best_idx = int(np.argmax(corr))
+    return float(corr[best_idx]), best_idx

@@ -53,9 +53,12 @@ features:
   num_workers: 4
   precision: "fp16"
   pooling: "mean"
+  force_recompute: false
 
 sae:
   latent_dim: 2048
+  variant: "l1"
+  topk_k: 64
   l1_lambda: 1.0e-4
   learning_rate: 1.0e-3
   weight_decay: 1.0e-6

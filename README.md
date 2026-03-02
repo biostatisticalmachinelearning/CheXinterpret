@@ -16,6 +16,11 @@ This project builds a reproducible pipeline for two questions:
 7. Applies concept-space debiasing (age-group residualization) and re-audits fairness.
 8. Saves a full JSON report for comparison.
 
+By default, the pipeline is cache-first for CheXagent embeddings:
+
+- If `features.npz` exists, it is reused.
+- New embeddings are extracted only when the cache is missing (or when `features.force_recompute: true`).
+
 ## Repository Layout
 
 - `configs/default.yaml`: main experiment config.
@@ -64,9 +69,15 @@ Modular execution:
 
 ```bash
 chex-prepare-manifest --config configs/default.yaml
-chex-extract-features --config configs/default.yaml --build-manifest-if-missing
+chex-extract-features --config configs/default.yaml
 chex-train-sae --config configs/default.yaml
 python scripts/run_study.py --config configs/default.yaml
+```
+
+Force-refresh cached embeddings:
+
+```bash
+chex-extract-features --config configs/default.yaml --force
 ```
 
 ## Outputs
@@ -77,6 +88,37 @@ All outputs are written to `paths.output_root`:
 - `features.npz`: CheXagent feature bundle + labels/metadata.
 - `sae.pt`: trained SAE checkpoint.
 - `study_metrics.json`: full report with model performance, fairness gaps, disentanglement metrics, and age-associated latent rankings.
+
+## SAE Variants
+
+The trainer supports:
+
+- `variant: "l1"`: standard L1-regularized sparse autoencoder.
+- `variant: "topk"`: top-k sparse activation autoencoder (`topk_k` active latents per sample).
+
+Set these in `sae` config.
+
+## Multi-Run Benchmark (L1 vs Top-k)
+
+Use a sweep file (example: `configs/sae_sweep.yaml`) to train many SAE configurations and compare them.
+
+```bash
+chex-run-sae-sweep --base-config configs/default.yaml --sweep-config configs/sae_sweep.yaml
+```
+
+Sweep outputs are organized by run:
+
+- `.../sae_sweep/<run_name>/run_config.yaml`
+- `.../sae_sweep/<run_name>/sae.pt`
+- `.../sae_sweep/<run_name>/metrics.json`
+
+Global comparison artifacts:
+
+- `.../sae_sweep/summary.csv`
+- `.../sae_sweep/summary.json`
+- `.../sae_sweep/plots/reconstruction_mse.png`
+- `.../sae_sweep/plots/pathology_correlations.png`
+- `.../sae_sweep/plots/recon_vs_correlation.png`
 
 ## Fairness Correction Strategy
 

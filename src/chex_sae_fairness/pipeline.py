@@ -8,18 +8,16 @@ import torch
 from torch.utils.data import DataLoader, TensorDataset
 
 from chex_sae_fairness.config import ExperimentConfig
-from chex_sae_fairness.data.chexpert_plus import build_manifest, save_manifest
-from chex_sae_fairness.evaluation.disentanglement import evaluate_disentanglement, reconstruction_metrics
+from chex_sae_fairness.data.feature_cache import load_or_create_feature_bundle
+from chex_sae_fairness.evaluation.disentanglement import (
+    evaluate_disentanglement,
+    reconstruction_metrics,
+    summarize_latent_correlations,
+)
 from chex_sae_fairness.evaluation.fairness import evaluate_group_fairness, evaluate_multilabel_predictions
 from chex_sae_fairness.mitigation.concept_debias import (
     fit_concept_residualizer,
     rank_age_associated_concepts,
-)
-from chex_sae_fairness.models.chexagent_features import (
-    CheXagentVisionFeatureExtractor,
-    FeatureExtractionConfig,
-    load_feature_bundle,
-    save_feature_bundle,
 )
 from chex_sae_fairness.models.sae import SparseAutoencoder
 from chex_sae_fairness.training.train_probe import fit_multilabel_probe
@@ -33,32 +31,8 @@ def run_full_study(config_path: str) -> dict[str, object]:
     cfg.ensure_output_dirs()
     seed_everything(cfg.seed)
 
-    manifest_result = build_manifest(cfg)
-    save_manifest(manifest_result.manifest, cfg.manifest_path)
-
-    extractor = CheXagentVisionFeatureExtractor(
-        FeatureExtractionConfig(
-            model_name=cfg.features.model_name,
-            device=cfg.features.device,
-            batch_size=cfg.features.batch_size,
-            num_workers=cfg.features.num_workers,
-            precision=cfg.features.precision,
-            pooling=cfg.features.pooling,
-        )
-    )
-    features = extractor.extract_from_manifest(manifest_result.manifest)
-
-    save_feature_bundle(
-        output_path=str(cfg.feature_path),
-        features=features,
-        manifest=manifest_result.manifest,
-        split_col=cfg.schema.split_col,
-        pathology_cols=cfg.schema.pathology_cols,
-        metadata_cols=cfg.schema.metadata_cols,
-        age_col=cfg.schema.age_col,
-    )
-
-    bundle = load_feature_bundle(str(cfg.feature_path))
+    feature_result = load_or_create_feature_bundle(cfg, force_recompute=cfg.features.force_recompute)
+    bundle = feature_result.bundle
     splits = bundle["split"].astype(str)
     pathologies = bundle["y_pathology"].astype(np.float32)
     x = bundle["features"].astype(np.float32)
@@ -94,6 +68,8 @@ def run_full_study(config_path: str) -> dict[str, object]:
             "state_dict": sae_output.model.state_dict(),
             "input_dim": int(x.shape[1]),
             "latent_dim": int(cfg.sae.latent_dim),
+            "variant": str(cfg.sae.variant),
+            "topk_k": int(cfg.sae.topk_k),
         },
         cfg.sae_checkpoint_path,
     )
@@ -174,6 +150,13 @@ def run_full_study(config_path: str) -> dict[str, object]:
         metadata_test=metadata_test,
         metadata_cols=metadata_cols,
     )
+    latent_correlations = summarize_latent_correlations(
+        z=z_test,
+        y_pathology=y_test,
+        pathology_cols=path_cols,
+        metadata=metadata_test,
+        metadata_cols=metadata_cols,
+    )
 
     recon = reconstruction_metrics(x_test, x_hat_test)
     age_assoc = rank_age_associated_concepts(z_train, age_groups_train, top_k=25)
@@ -181,11 +164,12 @@ def run_full_study(config_path: str) -> dict[str, object]:
     report = {
         "config_path": str(Path(config_path).resolve()),
         "counts": {
-            "n_total": int(len(manifest_result.manifest)),
+            "n_total": int(len(splits)),
             "n_train": int(train_mask.sum()),
             "n_valid": int(valid_mask.sum()),
             "n_test": int(test_mask.sum()),
-            "manifest_rows_dropped": int(manifest_result.dropped_rows),
+            "manifest_rows_dropped": int(feature_result.manifest_rows_dropped),
+            "used_cached_features": bool(feature_result.used_cache),
         },
         "sae": {
             "train_curve": sae_output.train_curve,
@@ -205,6 +189,7 @@ def run_full_study(config_path: str) -> dict[str, object]:
             "fairness": debiased_fairness,
         },
         "disentanglement": disentanglement,
+        "latent_correlations": latent_correlations,
         "age_associated_latents": age_assoc,
     }
 

@@ -45,11 +45,14 @@ class FeatureConfig:
     num_workers: int = 4
     precision: str = "fp16"
     pooling: str = "mean"
+    force_recompute: bool = False
 
 
 @dataclass(slots=True)
 class SAEConfig:
     latent_dim: int
+    variant: str = "l1"
+    topk_k: int = 64
     l1_lambda: float = 1e-4
     learning_rate: float = 1e-3
     weight_decay: float = 1e-6
