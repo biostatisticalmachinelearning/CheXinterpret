@@ -43,6 +43,7 @@ def build_manifest(cfg: ExperimentConfig) -> ManifestBuildResult:
     ].copy()
 
     frame = _apply_uncertain_policy(frame, cfg)
+    frame = _handle_missing_pathology_labels(frame, cfg)
 
     image_root = Path(cfg.paths.image_root).resolve()
     search_roots = _infer_png_search_roots(image_root)
@@ -403,6 +404,36 @@ def _apply_uncertain_policy(frame: pd.DataFrame, cfg: ExperimentConfig) -> pd.Da
         raise ValueError(f"Unknown uncertain label policy: {cfg.data.uncertain_label_policy}")
 
     frame.loc[:, cols] = frame.loc[:, cols].apply(pd.to_numeric, errors="coerce")
+    return frame
+
+
+def _handle_missing_pathology_labels(frame: pd.DataFrame, cfg: ExperimentConfig) -> pd.DataFrame:
+    cols = cfg.schema.pathology_cols
+    if not cols:
+        return frame
+
+    missing_total = int(frame.loc[:, cols].isna().sum().sum())
+    if missing_total == 0:
+        return frame
+
+    # Default behavior: treat absent labels as negative findings so partially
+    # labeled releases do not collapse to an empty manifest.
+    if cfg.data.uncertain_label_policy.lower() != "ignore":
+        frame = frame.copy()
+        frame.loc[:, cols] = frame.loc[:, cols].fillna(0.0)
+        warnings.warn(
+            f"Filled {missing_total} missing pathology labels with 0 (non-diagnosis).",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return frame
+
+    warnings.warn(
+        "Missing pathology labels detected while uncertain_label_policy='ignore'; "
+        "rows with remaining NaNs will be dropped.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
     return frame
 
 
