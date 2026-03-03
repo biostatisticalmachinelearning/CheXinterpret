@@ -46,6 +46,7 @@ data:
   min_age: 18
   max_age: 110
   age_bins: [18, 35, 50, 65, 80, 120]
+  allowed_views: ["frontal"]
 
 features:
   model_name: "StanfordAIMI/CheXagent-8b"

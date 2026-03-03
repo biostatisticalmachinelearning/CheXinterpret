@@ -105,6 +105,11 @@ chex-run-supplement-paper --config configs/default.yaml --publication-config con
   - `one`: `-1 -> 1`
   - `ignore`: `-1 -> NaN`, then dropped where required
 - Missing pathology NaNs are filled with `0` unless `ignore` policy is used.
+- View filtering (`data.allowed_views`): list of view types to retain (e.g. `["frontal"]`).
+  View type is inferred from the image file path (`"frontal"` / `"lateral"` / `"unknown"`).
+  An empty list (default) keeps all views. The default config restricts to frontal views
+  only, consistent with the CheXagent paper's own fairness evaluation methodology.
+  Lateral-inclusive runs are reserved for the supplement's `view_sensitivity` analysis.
 
 ## 4.3 Embedding Extraction (CheXagent)
 
@@ -432,6 +437,7 @@ Primary configs:
 
 Important controls:
 
+- Data: `allowed_views` (e.g. `["frontal"]` to restrict to frontal-only; `[]` for all views)
 - SAE: `latent_dim`, `variant`, `topk_k`, `l1_lambda`, optimizer settings
 - Fairness: `debias_mode`, `debias_strength`, `threshold`
 - Publication supplement: seeds, uncertain policies, baseline methods, threshold grid, age-bin sets, missingness fractions

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import warnings
 import zipfile
@@ -15,6 +16,8 @@ from PIL import Image
 from torch.utils.data import Dataset
 
 from chex_sae_fairness.config import ExperimentConfig
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -51,6 +54,22 @@ def build_manifest(cfg: ExperimentConfig) -> ManifestBuildResult:
         lambda p: _resolve_png_image_path(str(p), search_roots)
     )
 
+    frame["view_type"] = frame[cfg.schema.image_path_col].apply(
+        lambda p: _infer_view_type(str(p))
+    )
+
+    if cfg.data.allowed_views:
+        allowed = {v.lower().strip() for v in cfg.data.allowed_views}
+        before_view = len(frame)
+        frame = frame.loc[frame["view_type"].isin(allowed)].copy()
+        n_dropped_view = before_view - len(frame)
+        logger.info(
+            "View filter %s: kept %d rows, dropped %d rows.",
+            sorted(allowed),
+            len(frame),
+            n_dropped_view,
+        )
+
     age_bin_labels = _age_bin_labels(cfg.data.age_bins)
     frame["age_group"] = pd.cut(
         frame[cfg.schema.age_col],
@@ -62,6 +81,7 @@ def build_manifest(cfg: ExperimentConfig) -> ManifestBuildResult:
 
     output_cols: list[str] = [
         "image_path",
+        "view_type",
         cfg.schema.split_col,
         cfg.schema.patient_id_col,
         cfg.schema.age_col,
@@ -579,3 +599,12 @@ def _canonicalize_split_name(name: str) -> str:
     if value in {"val", "validation", "dev"}:
         return "valid"
     return value
+
+
+def _infer_view_type(path: str) -> str:
+    value = str(path).lower()
+    if "lateral" in value:
+        return "lateral"
+    if "frontal" in value:
+        return "frontal"
+    return "unknown"
