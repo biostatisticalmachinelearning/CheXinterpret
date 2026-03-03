@@ -4,6 +4,7 @@ from dataclasses import asdict, replace
 from datetime import datetime
 import logging
 from pathlib import Path
+import shutil
 from typing import Any
 
 import pandas as pd
@@ -35,6 +36,7 @@ def run_comprehensive_study(
     logger.info("Run directory: %s", run_root)
 
     workspace_cfg = replace(base_cfg, paths=replace(base_cfg.paths, output_root=str(run_root / "workspace")))
+    _prime_workspace_cache(base_cfg, workspace_cfg)
     resolved_cfg_path = _write_config_snapshot(
         workspace_cfg,
         run_root / "configs" / "base_config_resolved.yaml",
@@ -56,6 +58,7 @@ def run_comprehensive_study(
         sweep_config_path=str(resolved_sweep_path),
         force_recompute_features=force_recompute_features,
     )
+    _sync_workspace_cache_back(base_cfg, workspace_cfg)
     summary_csv = Path(str(sweep_summary["summary_csv"]))
     summary_df = pd.read_csv(summary_csv)
     best_run_name = _select_best_run(summary_df)
@@ -243,3 +246,47 @@ def _write_yaml(payload: dict[str, Any], output_path: Path) -> Path:
     with output_path.open("w", encoding="utf-8") as handle:
         yaml.safe_dump(payload, handle, sort_keys=False)
     return output_path
+
+
+def _prime_workspace_cache(source_cfg: ExperimentConfig, target_cfg: ExperimentConfig) -> None:
+    copied = 0
+    copied += _copy_if_exists(source_cfg.manifest_path, target_cfg.manifest_path)
+    copied += _copy_if_exists(source_cfg.feature_path, target_cfg.feature_path)
+    if copied > 0:
+        logger.info(
+            "Primed workspace cache from %s (copied %d artifact%s).",
+            source_cfg.output_root,
+            copied,
+            "" if copied == 1 else "s",
+        )
+
+
+def _sync_workspace_cache_back(source_cfg: ExperimentConfig, target_cfg: ExperimentConfig) -> None:
+    copied = 0
+    copied += _copy_if_newer(target_cfg.manifest_path, source_cfg.manifest_path)
+    copied += _copy_if_newer(target_cfg.feature_path, source_cfg.feature_path)
+    if copied > 0:
+        logger.info(
+            "Updated persistent cache at %s from workspace (copied %d artifact%s).",
+            source_cfg.output_root,
+            copied,
+            "" if copied == 1 else "s",
+        )
+
+
+def _copy_if_exists(source: Path, target: Path) -> int:
+    if not source.exists() or target.exists():
+        return 0
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, target)
+    return 1
+
+
+def _copy_if_newer(source: Path, target: Path) -> int:
+    if not source.exists():
+        return 0
+    if target.exists() and source.stat().st_mtime <= target.stat().st_mtime:
+        return 0
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, target)
+    return 1
