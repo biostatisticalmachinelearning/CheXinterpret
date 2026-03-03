@@ -50,7 +50,7 @@ Update `configs/default.yaml` with your local paths and schema:
 - `paths.chexbert_labels_json`: either `chexbert_labels/findings_fixed.json` or `chexbert_labels.zip`.
 - `schema.image_path_col`: usually `path_to_image`.
 - `schema.pathology_cols`: should match your 14 pathology columns from CheXbert labels.
-- `schema.metadata_cols`: metadata columns from the CSV.
+- `schema.metadata_cols`: metadata columns from the CSV (CheXpert Plus commonly uses `age`, `sex`, `race`, `ethnicity`, `interpreter_needed`, `insurance_type`, `recent_bmi`, `deceased`).
 - `schema.split_col`: can be inferred from `path_to_image` if missing.
 
 CheXpert Plus PNG layout (official examples) uses relative image paths like:

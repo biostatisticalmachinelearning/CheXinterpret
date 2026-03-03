@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import warnings
 import zipfile
 from io import StringIO
 from dataclasses import dataclass
@@ -25,6 +26,7 @@ class ManifestBuildResult:
 def build_manifest(cfg: ExperimentConfig) -> ManifestBuildResult:
     frame = pd.read_csv(cfg.paths.metadata_csv, low_memory=False)
     frame = _apply_common_column_aliases(frame, cfg)
+    frame = _ensure_metadata_columns(frame, cfg.schema.metadata_cols)
 
     frame = _maybe_merge_pathology_labels(frame, cfg)
     frame = _derive_split_column_if_missing(frame, cfg)
@@ -175,27 +177,73 @@ def _required_columns(cfg: ExperimentConfig) -> list[str]:
     return sorted(cols)
 
 
+def _ensure_metadata_columns(frame: pd.DataFrame, metadata_cols: list[str]) -> pd.DataFrame:
+    missing = [col for col in metadata_cols if col not in frame.columns]
+    if not missing:
+        return frame
+
+    frame = frame.copy()
+    for col in missing:
+        frame[col] = np.nan
+
+    warnings.warn(
+        "Metadata columns missing in CSV were added as NaN: " + ", ".join(missing),
+        RuntimeWarning,
+        stacklevel=2,
+    )
+    return frame
+
+
 def _apply_common_column_aliases(frame: pd.DataFrame, cfg: ExperimentConfig) -> pd.DataFrame:
-    alias_candidates: dict[str, list[str]] = {
-        cfg.schema.image_path_col: ["path_to_image", "Path", "path"],
-        cfg.schema.split_col: ["split", "Split"],
-        cfg.schema.patient_id_col: ["patient_id", "subject_id", "patient"],
-        cfg.schema.age_col: ["patient_age", "age"],
-        cfg.schema.sex_col: ["patient_sex", "sex", "gender"],
-        cfg.schema.race_col: ["patient_race", "race"],
-    }
+    target_columns = list(
+        dict.fromkeys(
+            [
+                cfg.schema.image_path_col,
+                cfg.schema.split_col,
+                cfg.schema.patient_id_col,
+                cfg.schema.age_col,
+                cfg.schema.sex_col,
+                cfg.schema.race_col,
+                *cfg.schema.metadata_cols,
+            ]
+        )
+    )
 
     rename_map: dict[str, str] = {}
-    for target, options in alias_candidates.items():
+    for target in target_columns:
         if target in frame.columns:
             continue
-        source = next((candidate for candidate in options if candidate in frame.columns), None)
+        options = _alias_options_for_target(target)
+        source = next(
+            (candidate for candidate in options if candidate in frame.columns and candidate not in rename_map),
+            None,
+        )
         if source is not None and source != target:
             rename_map[source] = target
 
     if not rename_map:
         return frame
     return frame.rename(columns=rename_map)
+
+
+def _alias_options_for_target(target: str) -> list[str]:
+    alias_groups = [
+        ("path_to_image", "Path", "path"),
+        ("split", "Split"),
+        ("patient_id", "subject_id", "patient"),
+        ("age", "patient_age"),
+        ("sex", "patient_sex", "gender"),
+        ("race", "patient_race"),
+        ("ethnicity", "patient_ethnicity"),
+        ("insurance_type", "patient_insurance_type"),
+        ("interpreter_needed", "patient_primary_language", "primary_language"),
+        ("recent_bmi", "patient_recent_bmi", "bmi"),
+        ("deceased", "patient_deceased", "is_deceased"),
+    ]
+    for group in alias_groups:
+        if target in group:
+            return [candidate for candidate in group if candidate != target]
+    return []
 
 
 def _ensure_columns(frame: pd.DataFrame, required: list[str]) -> None:
