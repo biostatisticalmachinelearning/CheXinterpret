@@ -1,40 +1,23 @@
-# CheXagent SAE Fairness Study
+# CheXinterpret: Methods + Figure/Tables Guide
 
-This project builds a reproducible pipeline for two questions:
+This repository is a full research pipeline for studying sparse autoencoder (SAE) concepts learned from CheXagent embeddings, with emphasis on clinical concept alignment and fairness across age groups.
 
-1. Can a **Sparse Autoencoder (SAE)** learn disentangled concepts for 14 chest pathologies and 8 patient metadata elements from CheXagent vision representations?
-2. If a pathology classifier on CheXagent features underperforms for specific age groups, can SAE concepts support a practical fairness-correction workflow?
+It is designed so a reader can:
 
-## What the Pipeline Does
+1. Reproduce the full training/evaluation flow.
+2. Understand the mathematical/statistical definitions used in each result.
+3. Map every generated table/figure file to its exact meaning.
 
-1. Builds a clean manifest from CheXpert Plus metadata.
-2. Extracts fixed vision features with CheXagent.
-3. Trains an SAE on train split features.
-4. Evaluates concept disentanglement of SAE latents for pathology + metadata targets.
-5. Trains baseline pathology probe on raw features and audits age-group fairness.
-6. Trains pathology probe on SAE latents.
-7. Applies concept-space debiasing (age-group residualization) and re-audits fairness.
-8. Saves a full JSON report for comparison.
+## 1) Scope and Research Questions
 
-By default, the pipeline is cache-first for CheXagent embeddings:
+The project addresses two primary questions:
 
-- If `features.npz` exists, it is reused.
-- New embeddings are extracted only when the cache is missing (or when `features.force_recompute: true`).
+1. **Concept learning**: Can sparse latent features learned from CheXagent image embeddings recover clinically meaningful axes related to 14 pathologies and 8 metadata variables?
+2. **Fairness intervention**: If a downstream pathology classifier underperforms in specific age groups, can latent-space intervention reduce group disparities while preserving overall performance?
 
-## Repository Layout
+## 2) Setup
 
-- `configs/default.yaml`: main experiment config.
-- `configs/quickstart.yaml`: lightweight settings for smoke tests.
-- `src/chex_sae_fairness/data/`: manifest creation and dataset utilities.
-- `src/chex_sae_fairness/models/`: CheXagent feature extraction + SAE model.
-- `src/chex_sae_fairness/training/`: SAE and probe trainers.
-- `src/chex_sae_fairness/evaluation/`: disentanglement and fairness metrics.
-- `src/chex_sae_fairness/mitigation/`: concept-space debiasing functions.
-- `src/chex_sae_fairness/publication/`: core/supplement paper pipelines, tables, and figure builders.
-- `src/chex_sae_fairness/pipeline.py`: end-to-end study runner.
-- `scripts/`: CLI wrappers.
-
-## Setup
+## 2.1 Environment
 
 ```bash
 python -m venv .venv
@@ -42,208 +25,420 @@ source .venv/bin/activate
 pip install -e .
 ```
 
-## Data and Config Requirements
+Dependencies are managed in `pyproject.toml` and include:
 
-Update `configs/default.yaml` with your local paths and schema:
+- `torch`, `transformers`, `einops` (CheXagent loading)
+- `numpy`, `pandas`, `scikit-learn`, `scipy`
+- `matplotlib`, `seaborn`
 
-- `paths.image_root`: directory that contains extracted PNG images.
-- `paths.metadata_csv`: `df_chexpert_plus_240401.csv`.
-- `paths.chexbert_labels_json`: either `chexbert_labels/findings_fixed.json` or `chexbert_labels.zip`.
-- `schema.image_path_col`: usually `path_to_image`.
-- `schema.pathology_cols`: should match your 14 pathology columns from CheXbert labels.
-- `schema.metadata_cols`: metadata columns from the CSV (CheXpert Plus commonly uses `age`, `sex`, `race`, `ethnicity`, `interpreter_needed`, `insurance_type`, `recent_bmi`, `deceased`).
-- `schema.split_col`: can be inferred from `path_to_image` if missing.
-- `probes.c_value` / `probes.max_iter`: logistic probe hyperparameters used for pathology classifiers.
-- `fairness.debias_mode`: choose where age-concept residualization is applied (`train_and_test`, `test_only`, or `train_only`).
-- `features.cache_dir`: local HuggingFace cache directory for CheXagent model/processor weights (downloaded once, then reused).
+## 2.2 Data Inputs
 
-CheXpert Plus PNG layout (official examples) uses relative image paths like:
+Configure paths in `configs/default.yaml`:
 
-- `train/patientXXXX/studyY/view1_frontal.jpg`
-- `valid/patientXXXX/studyY/view1_frontal.jpg`
+- `paths.image_root`: root of extracted PNG dataset
+- `paths.metadata_csv`: CheXpert Plus CSV (`df_chexpert_plus_240401.csv`)
+- `paths.chexbert_labels_json`: pathology labels file or zip
+- `features.cache_dir`: Hugging Face cache directory (model downloaded once and reused)
 
-You only need one image modality for this pipeline. If using PNG:
+Supported PNG layouts include:
 
-- extract `png_chexpert_plus_chunk_*.zip`
-- set `paths.image_root` to a directory containing either `train/` and `valid/`, or `PNG/train/` and `PNG/valid/`
-- `val/` is accepted and normalized to `valid`
-- extracted chunk directories like `png_chexpert_plus_chunk_0/PNG/...` are also scanned automatically
+- `train/...`, `valid/...`
+- `PNG/train/...`, `PNG/valid/...`
+- chunked extraction directories (`png_chexpert_plus_chunk_*/...`)
+- `val` alias normalized to `valid`
 
-When pathology columns are not present in the CSV, the manifest builder will merge them automatically from `paths.chexbert_labels_json` using `path_to_image`.
-
-`uncertain_label_policy` supports:
-
-- `zero`: map uncertain labels (`-1`) to `0`
-- `one`: map uncertain labels (`-1`) to `1`
-- `ignore`: convert uncertain labels to missing and drop affected rows
-
-## Run
-
-End-to-end:
-
-```bash
-chex-run-study --config configs/default.yaml
-```
-
-By default, `chex-run-study` now runs a **comprehensive multi-SAE study**:
-
-1. Runs an SAE sweep (L1 + top-k variants / hyperparameters).
-2. Selects the best SAE run by a composite objective over reconstruction, disentanglement, correlation, and fairness-aware probe metrics.
-3. Runs full baseline vs SAE vs debiased fairness analysis with the selected SAE.
-4. Exports publication-ready figures.
-
-Every run is saved into a timestamped directory so no results are overwritten:
-
-- `<output_root>/runs/YYYYMMDD_HHMMSS/`
-- key artifacts: `run_summary.json`, `configs/`, `sae_sweep/`, `workspace/study_metrics.json`, `figures/`
-
-## Publication Pipelines
-
-This repository now provides two dedicated, timestamped paper pipelines:
-
-1. **Core pipeline** (`chex-run-core-paper`)
-2. **Supplement pipeline** (`chex-run-supplement-paper`)
-
-Generate a publication config template:
-
-```bash
-chex-init-paper-config --output configs/publication.yaml
-```
-
-Run core figures/tables:
-
-```bash
-chex-run-core-paper --config configs/default.yaml --publication-config configs/publication.yaml
-```
-
-Run supplementary figures/tables:
-
-```bash
-chex-run-supplement-paper --config configs/default.yaml --publication-config configs/publication.yaml
-```
-
-Outputs are written to timestamped folders:
-
-- Core: `<output_root>/publication/core/YYYYMMDD_HHMMSS/`
-- Supplement: `<output_root>/publication/supplement/YYYYMMDD_HHMMSS/`
-
-Each pipeline writes:
-
-- `tables/*.csv` and `tables/*.md`
-- `figures/*.png`
-- `<pipeline>_pipeline_summary.json`
-- `reproducibility_appendix.json`
-
-Publication-ready figures are saved under:
-
-- `figures/sweep/`: hyperparameter ranking, disentanglement-vs-correlation, fairness-performance tradeoff, metric scorecard
-- `figures/best_model/`: baseline vs SAE vs debiased performance/fairness, calibration, fairness-performance Pareto, per-group results, top age-associated latents, SAE training curve
-
-Run a single SAE only (legacy behavior):
-
-```bash
-chex-run-study --config configs/default.yaml --single-sae
-```
-
-Live progress is logged to console and to a file by default:
-
-- default file (comprehensive mode): `<output_root>/runs/<timestamp>/logs/run_study.log`
-- default file (single-SAE mode): `<output_root>/logs/run_study.log`
-- control verbosity with `--log-level` (e.g. `INFO`, `DEBUG`)
-- override file path with `--log-file /path/to/run.log`
-
-Before first run, audit your metadata/path wiring:
+## 2.3 Quick Data Audit
 
 ```bash
 chex-audit-data --config configs/default.yaml --sample-size 3000
 ```
 
-Modular execution:
+Use this before long runs to verify path resolution rate and split discovery.
+
+## 3) Run Flow
+
+## 3.1 Main end-to-end run
 
 ```bash
-chex-prepare-manifest --config configs/default.yaml
-chex-extract-features --config configs/default.yaml
-chex-train-sae --config configs/default.yaml
-python scripts/run_study.py --config configs/default.yaml
+chex-run-study --config configs/default.yaml
 ```
 
-Force-refresh cached embeddings:
+Default behavior is comprehensive:
+
+1. Build/normalize manifest.
+2. Reuse cached `features.npz` if present, otherwise extract CheXagent embeddings.
+3. Run SAE hyperparameter sweep.
+4. Select best SAE by composite criterion.
+5. Run full baseline/SAE/debiased evaluation.
+6. Export JSON summaries and figure artifacts.
+
+## 3.2 Single-SAE run
 
 ```bash
-chex-extract-features --config configs/default.yaml --force
+chex-run-study --config configs/default.yaml --single-sae
 ```
 
-## Outputs
-
-All outputs are written to `paths.output_root`:
-
-- `manifest.csv`: cleaned dataset manifest.
-- `features.npz`: CheXagent feature bundle + labels/metadata.
-- `sae.pt`: trained SAE checkpoint.
-- `study_metrics.json`: full report with model performance, fairness gaps, disentanglement metrics, and age-associated latent rankings.
-- `study_predictions.npz`: held-out labels/groups plus baseline/SAE/debiased score matrices for statistical and figure generation.
-
-Classifier performance now includes:
-
-- `macro_auroc`, `macro_accuracy`, `micro_accuracy`, `macro_brier`, `macro_ece`
-- group fairness summaries including `worst_group_macro_auroc` and `worst_group_macro_accuracy`
-- paired bootstrap method-comparison tests with multiple-testing corrected p-values (core pipeline)
-- concept-level permutation controls with BH/Holm corrections (supplement pipeline)
-
-## SAE Variants
-
-The trainer supports:
-
-- `variant: "l1"`: standard L1-regularized sparse autoencoder.
-- `variant: "topk"`: top-k sparse activation autoencoder (`topk_k` active latents per sample).
-
-Set these in `sae` config.
-
-## Multi-Run Benchmark (L1 vs Top-k)
-
-Use a sweep file (example: `configs/sae_sweep.yaml`) to train many SAE configurations and compare them.
+## 3.3 Publication pipelines
 
 ```bash
-chex-run-sae-sweep --base-config configs/default.yaml --sweep-config configs/sae_sweep.yaml
+chex-init-paper-config --output configs/publication.yaml
+chex-run-core-paper --config configs/default.yaml --publication-config configs/publication.yaml
+chex-run-supplement-paper --config configs/default.yaml --publication-config configs/publication.yaml
 ```
 
-Sweep outputs are organized by run:
+## 4) Methods (Math + ML + Stats)
 
-- `.../sae_sweep/<run_name>/run_config.yaml`
-- `.../sae_sweep/<run_name>/sae.pt`
-- `.../sae_sweep/<run_name>/metrics.json`
+## 4.1 Notation
 
-Global comparison artifacts:
+- `x`: CheXagent feature vector per image.
+- `z`: SAE latent vector.
+- `x_hat`: reconstructed feature vector.
+- `y`: multi-label pathology target vector.
+- `g`: age-group membership.
 
-- `.../sae_sweep/summary.csv`
-- `.../sae_sweep/summary.json`
-- `.../sae_sweep/plots/reconstruction_mse.png`
-- `.../sae_sweep/plots/pathology_correlations.png`
-- `.../sae_sweep/plots/recon_vs_correlation.png`
-- `.../sae_sweep/plots/worst_group_macro_auroc.png`
+## 4.2 Data and Labels
 
-## Fairness Correction Strategy
+- Pathology labels are multi-label binary targets.
+- Metadata columns are included for concept analyses.
+- Uncertain label policy (`data.uncertain_label_policy`):
+  - `zero`: `-1 -> 0`
+  - `one`: `-1 -> 1`
+  - `ignore`: `-1 -> NaN`, then dropped where required
+- Missing pathology NaNs are filled with `0` unless `ignore` policy is used.
 
-The provided mitigation is **concept-space residualization**:
+## 4.3 Embedding Extraction (CheXagent)
 
-1. Fit group means of SAE latent activations on training data by age bin.
-2. Subtract each group-specific latent shift from samples in that group.
-3. Retrain/evaluate pathology probes on debiased concepts.
-4. Compare AUROC and equalized-odds gaps before/after.
+The loader uses:
 
-You can choose how the intervention is applied:
+- `AutoProcessor.from_pretrained(..., trust_remote_code=True)`
+- `AutoModelForCausalLM.from_pretrained(..., trust_remote_code=True)`
 
-- `fairness.debias_mode: "train_and_test"`: debias both SAE train/test concepts, then train/evaluate on debiased concepts.
-- `fairness.debias_mode: "test_only"`: train on original SAE concepts and debias only at test time.
-- `fairness.debias_mode: "train_only"`: debias SAE train concepts only, keeping test concepts untouched.
+Feature extraction is vision-side (not text-generation output):
 
-This is intentionally interpretable and auditable: the report also ranks age-associated latent units to support targeted review.
+- preferred: `model.get_image_features(...)`
+- fallback: vision/image hidden outputs (`image_embeds`, `vision_embeds`, etc.)
 
-## Notes on CheXagent Integration
+Model/processor artifacts are cached under `features.cache_dir`.
 
-CheXagent checkpoints may expose image features differently across versions. The feature extractor tries common APIs (`get_image_features`, `image_embeds`, hidden states) and raises a clear error if adaptation is required for your checkpoint.
+## 4.4 SAE Architectures
 
-## Sanity Check
+Two SAE variants are supported:
+
+1. **L1 SAE**
+   - Encoder: `z = ReLU(W_e x + b_e)`
+   - Decoder: `x_hat = W_d z + b_d`
+   - Loss:
+     `L = MSE(x, x_hat) + lambda * mean(|z|)`
+
+2. **Top-k SAE**
+   - Same encoder/decoder, but after activation only top-k entries per sample are retained.
+   - Loss:
+     `L = MSE(x, x_hat)`
+
+## 4.5 Downstream Pathology Probes
+
+Primary classifier is one-vs-rest logistic regression on:
+
+- raw features (`baseline_feature_probe`)
+- SAE latents (`sae_concept_probe`)
+- debiased SAE latents (`sae_concept_probe_debiased`)
+
+## 4.6 Fairness Intervention: Age Residualization
+
+For each age group `g`:
+
+- `mu_g = mean(z | g)`
+- `mu = global mean(z)`
+
+Residualized representation:
+
+- `z' = z - alpha * (mu_g - mu)`
+
+where `alpha = fairness.debias_strength`.
+
+Modes:
+
+- `train_and_test`: residualize both train/test latents
+- `test_only`: residualize only test latents
+- `train_only`: residualize only train latents
+
+## 4.7 Metrics
+
+## Performance
+
+- `macro_auroc`: mean AUROC across labels with valid class support.
+- `macro_accuracy`: per-label thresholded accuracy averaged across labels.
+- `micro_accuracy`: global element-wise thresholded accuracy.
+- `macro_brier`: per-label Brier score averaged across labels.
+- `macro_ece`: per-label ECE averaged across labels (10 bins).
+
+## Group Fairness (age bins)
+
+For each group `g`:
+
+- `AUROC_g`, `ACC_g`, `TPR_g`, `FPR_g`
+
+Aggregates:
+
+- `worst_group_macro_auroc = min_g AUROC_g`
+- `worst_group_macro_accuracy = min_g ACC_g`
+- `macro_auroc_gap = max_g AUROC_g - min_g AUROC_g`
+- `macro_accuracy_gap = max_g ACC_g - min_g ACC_g`
+- `equalized_odds_tpr_gap = max_g TPR_g - min_g TPR_g`
+- `equalized_odds_fpr_gap = max_g FPR_g - min_g FPR_g`
+
+## 4.8 Disentanglement and Concept Validity
+
+Disentanglement module trains concept-specific sparse predictors:
+
+- pathology concepts: L1 logistic probe (AUROC)
+- categorical metadata: logistic probe (macro-F1)
+- numeric metadata: Lasso (R²)
+
+Latent-correlation module computes for each concept:
+
+- max absolute correlation with any latent feature
+- latent index achieving that max
+
+Additional latent diagnostics:
+
+- `latent_death_rate`: fraction of latent dims with near-zero activation frequency
+- `latent_mean_active_per_sample`: average active dimensions per sample
+- `latent_reuse_ratio`: proportion of latents reused across multiple concept winners
+- `latent_max_concepts_per_feature`: max number of concepts sharing one latent winner
+
+## 4.9 Statistical Inference
+
+## Bootstrap CIs
+
+- Nonparametric bootstrap for headline metrics (95% CI from quantiles).
+
+## Paired Method Tests
+
+- Paired bootstrap deltas between model pairs.
+- Reported metrics include:
+  - `worst_group_macro_auroc`
+  - `macro_auroc_gap`
+  - `macro_auroc`
+  - `macro_accuracy`
+  - `macro_brier`
+  - `macro_ece`
+- Two-sided p-value from bootstrap delta sign balance.
+
+## Multiple Testing
+
+- Benjamini-Hochberg FDR (`p_adj_bh`)
+- Holm-Bonferroni (`p_adj_holm`)
+
+## Permutation Controls
+
+- Concept-permutation tests compare observed concept correlations to null distributions from label permutation.
+- Report corrected p-values per concept.
+
+## 4.10 SAE Sweep Selection Objective
+
+Runs are scored via standardized composite metric across selected axes:
+
+- Higher-is-better terms: disentanglement, concept correlation, macro AUROC, worst-group AUROC, latent reuse/activity
+- Lower-is-better terms (sign-flipped): reconstruction MSE, fairness gaps, death rate
+
+Best run is the max composite score.
+
+## 4.11 Supplementary Baseline Models
+
+Supplement baseline suite includes:
+
+- `raw`: linear probe on raw embeddings
+- `pca`: PCA bottleneck + probe
+- `nmf`: NMF bottleneck + probe
+- `supervised_bottleneck`: trainable bottleneck predictor
+- `group_reweighted`: inverse-frequency group sample weights
+- `group_threshold`: post-hoc per-group thresholding
+- `equalized_odds`: approximate equalized-odds threshold tuning
+- `adversarial_debiasing`: bottleneck predictor with adversarial age-group classifier
+
+## 5) Output Artifacts
+
+## 5.1 Comprehensive study run
+
+`<output_root>/runs/YYYYMMDD_HHMMSS/`
+
+- `run_summary.json`
+- `configs/` snapshots
+- `sae_sweep/summary.csv`, `sae_sweep/summary.json`
+- `workspace/manifest.csv`
+- `workspace/features.npz`
+- `workspace/sae.pt`
+- `workspace/study_metrics.json`
+- `workspace/study_predictions.npz`
+- `figures/sweep/*.png`
+- `figures/best_model/*.png`
+
+## 5.2 Core publication run
+
+`<output_root>/publication/core/YYYYMMDD_HHMMSS/`
+
+- `core_pipeline_summary.json`
+- `reproducibility_appendix.json`
+- tables:
+  - `table1_cohort`
+  - `table2_main_results`
+  - `table2b_paired_tests`
+  - `table2c_group_fairness`
+  - `table3_intervention_ablation`
+- figures:
+  - `figures/sweep/*.png`
+  - `figures/best_model/*.png`
+
+## 5.3 Supplement publication run
+
+`<output_root>/publication/supplement/YYYYMMDD_HHMMSS/`
+
+- `supplement_pipeline_summary.json`
+- `reproducibility_appendix.json`
+- tables include (when available):
+  - `stable_seeds`
+  - `seed_variance`
+  - `uncertain_policy`
+  - `debias_ablation`
+  - `age_bin_sensitivity`
+  - `baseline_comparison`
+  - `threshold_sensitivity`
+  - `missingness_sensitivity`
+  - `permutation_control`
+  - `concept_precision_recall`
+  - `concept_permutation`
+  - `leakage_checks`
+  - `view_sensitivity`
+  - `external_validation`
+  - `human_eval`
+- figures: `figures/*.png`
+
+## 6) Figure Catalog (caption-style descriptions)
+
+This section describes every plot produced by the codebase.
+
+## 6.1 Sweep plots from `chex-run-sae-sweep` (`src/chex_sae_fairness/sweep.py`)
+
+- `reconstruction_mse.png`  
+  Bar chart of reconstruction MSE by SAE run. Lower is better for fidelity.
+- `pathology_correlations.png`  
+  Bar chart of mean max absolute pathology-correlation per run. Higher suggests stronger concept alignment.
+- `recon_vs_correlation.png`  
+  Scatter tradeoff of reconstruction MSE vs pathology correlation. Each point is a run.
+- `worst_group_macro_auroc.png`  
+  Bar chart of worst-group macro AUROC for concept probes; fairness-sensitive performance lens.
+
+## 6.2 Core sweep figures (`src/chex_sae_fairness/reporting/figures.py`)
+
+- `sae_hyperparam_ranking.png`  
+  Composite score ranking across SAE configurations.
+- `disentanglement_vs_pathology_correlation.png`  
+  Scatter: disentanglement score vs pathology-correlation strength.
+- `fairness_performance_tradeoff.png`  
+  Scatter: overall macro AUROC vs worst-group AUROC.
+- `run_metric_scorecard_heatmap.png`  
+  Z-scored metric heatmap across runs (signed so higher-is-better).
+
+## 6.3 Core study figures (`src/chex_sae_fairness/reporting/figures.py`)
+
+- `classifier_performance_summary.png`  
+  Baseline vs SAE vs debiased bars for macro metrics and worst-group performance.
+- `fairness_gap_summary.png`  
+  Group-gap comparisons (`macro_auroc_gap`, `macro_accuracy_gap`, EO TPR/FPR gaps).
+- `calibration_summary.png`  
+  Macro Brier and ECE by method (lower is better).
+- `pareto_fairness_vs_performance.png`  
+  Fairness gain vs AUROC drop relative to baseline.
+- `group_macro_auroc.png`  
+  Per-age-group macro AUROC by method.
+- `group_macro_accuracy.png`  
+  Per-age-group macro accuracy by method.
+- `top_age_associated_latents.png`  
+  Highest age-associated latent units (between-group variance style score).
+- `sae_training_curve.png`  
+  Train/validation SAE loss across epochs.
+
+## 6.4 Supplement figures (`src/chex_sae_fairness/publication/figures.py`)
+
+- `seed_stability_macro_auroc.png`  
+  Box/strip plot of macro AUROC across seeds.
+- `uncertain_policy_sensitivity.png`  
+  Bar plot of uncertain-label policy ablation.
+- `debias_mode_strength_sensitivity.png`  
+  Line plot: worst-group macro AUROC vs debias strength by mode.
+- `age_bin_sensitivity.png`  
+  Macro AUROC gap under alternative age-bin schemes.
+- `alternative_baselines_macro_auroc.png`  
+  Macro AUROC comparison across alternative baseline methods.
+- `baseline_pareto_front.png`  
+  Fairness improvement vs AUROC drop vs raw baseline across baseline methods.
+- `threshold_sensitivity.png`  
+  Fairness gap sensitivity to classification threshold.
+- `missingness_sensitivity.png`  
+  Performance under simulated missing image rows and missing age-group metadata.
+- `permutation_control_histogram.png`  
+  Null distribution of mean pathology correlation under permutation with observed marker.
+- `concept_precision_recall_top_f1.png`  
+  Top concept-level F1 scores across pathology/metadata concept probes.
+- `concept_permutation_padj_hist.png`  
+  Distribution of BH-adjusted permutation p-values across concepts.
+- `view_type_sensitivity.png`  
+  Performance stratified by view type (frontal/lateral/unknown).
+
+## 7) Table Catalog
+
+## 7.1 Core tables
+
+- `table1_cohort`: split counts, age-group sample sizes, pathology prevalence.
+- `table2_main_results`: primary and secondary endpoints with CIs for baseline/SAE/debiased.
+- `table2b_paired_tests`: paired bootstrap deltas and corrected p-values.
+- `table2c_group_fairness`: per-group AUROC/accuracy/TPR/FPR with CIs.
+- `table3_intervention_ablation`: debias mode/strength ablations.
+
+## 7.2 Supplement tables
+
+- `stable_seeds`: per-seed outcomes by method.
+- `seed_variance`: mean/std over seeds.
+- `uncertain_policy`: uncertain label policy ablations.
+- `debias_ablation`: mode/strength intervention grid.
+- `age_bin_sensitivity`: alternate age partition robustness.
+- `baseline_comparison`: expanded baseline suite comparison.
+- `threshold_sensitivity`: threshold robustness.
+- `missingness_sensitivity`: missingness robustness.
+- `permutation_control`: global permutation null summary.
+- `concept_precision_recall`: concept-level precision/recall/F1/AUROC.
+- `concept_permutation`: concept-level permutation tests + corrected p-values.
+- `leakage_checks`: patient overlap and split integrity checks.
+- `view_sensitivity`: frontal/lateral sensitivity.
+- `external_validation`: transfer to external configs.
+- `human_eval`: human vs auto-label agreement summary.
+
+## 8) Configuration Reference
+
+Primary configs:
+
+- `configs/default.yaml`
+- `configs/publication.yaml`
+- `configs/sae_sweep.yaml`
+
+Important controls:
+
+- SAE: `latent_dim`, `variant`, `topk_k`, `l1_lambda`, optimizer settings
+- Fairness: `debias_mode`, `debias_strength`, `threshold`
+- Publication supplement: seeds, uncertain policies, baseline methods, threshold grid, age-bin sets, missingness fractions
+
+## 9) Reproducibility Metadata
+
+Each publication run writes `reproducibility_appendix.json` with:
+
+- timestamp
+- platform/Python/PyTorch/CUDA details
+- configuration seed and output root
+- data filtering/split counts
+- pipeline-specific metadata
+
+## 10) Sanity Check
 
 ```bash
 python -m compileall src tests scripts
