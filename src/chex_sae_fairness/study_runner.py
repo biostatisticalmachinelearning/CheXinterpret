@@ -1,0 +1,245 @@
+from __future__ import annotations
+
+from dataclasses import asdict, replace
+from datetime import datetime
+import logging
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+import yaml
+
+from chex_sae_fairness.config import ExperimentConfig, SAEConfig
+from chex_sae_fairness.pipeline import run_full_study
+from chex_sae_fairness.reporting.figures import generate_study_figures, generate_sweep_figures
+from chex_sae_fairness.sweep import run_sae_sweep
+from chex_sae_fairness.utils.io import write_json
+
+logger = logging.getLogger(__name__)
+
+
+def run_comprehensive_study(
+    config_path: str,
+    sweep_config_path: str | None,
+    run_name: str | None = None,
+    run_root: str | Path | None = None,
+    force_recompute_features: bool = False,
+) -> dict[str, Any]:
+    base_cfg = ExperimentConfig.from_yaml(config_path)
+    run_root = (
+        Path(run_root).expanduser().resolve()
+        if run_root is not None
+        else create_timestamped_run_dir(base_cfg.output_root, run_name=run_name)
+    )
+    run_root.mkdir(parents=True, exist_ok=True)
+    logger.info("Run directory: %s", run_root)
+
+    workspace_cfg = replace(base_cfg, paths=replace(base_cfg.paths, output_root=str(run_root / "workspace")))
+    resolved_cfg_path = _write_config_snapshot(
+        workspace_cfg,
+        run_root / "configs" / "base_config_resolved.yaml",
+    )
+
+    sweep_payload = _load_or_default_sweep_payload(
+        sweep_config_path=sweep_config_path,
+        base_sae_cfg=workspace_cfg.sae,
+    )
+    sweep_payload["output_dir"] = str((run_root / "sae_sweep").resolve())
+    resolved_sweep_path = _write_yaml(
+        sweep_payload,
+        run_root / "configs" / "sweep_config_resolved.yaml",
+    )
+
+    logger.info("Running SAE sweep for architecture/hyperparameter selection.")
+    sweep_summary = run_sae_sweep(
+        base_config_path=str(resolved_cfg_path),
+        sweep_config_path=str(resolved_sweep_path),
+        force_recompute_features=force_recompute_features,
+    )
+    summary_csv = Path(str(sweep_summary["summary_csv"]))
+    summary_df = pd.read_csv(summary_csv)
+    best_run_name = _select_best_run(summary_df)
+    logger.info("Best SAE run (composite): %s", best_run_name)
+
+    best_sae_cfg = _extract_sae_config_for_run(
+        base_cfg=workspace_cfg.sae,
+        sweep_payload=sweep_payload,
+        run_name=best_run_name,
+    )
+    best_cfg = replace(workspace_cfg, sae=best_sae_cfg)
+    best_cfg_path = _write_config_snapshot(
+        best_cfg,
+        run_root / "configs" / "best_sae_config.yaml",
+    )
+
+    logger.info("Running full fairness/performance study with selected SAE.")
+    best_report = run_full_study(str(best_cfg_path))
+    report_path = Path(best_cfg.study_metrics_path)
+
+    sweep_figures = generate_sweep_figures(
+        summary=summary_df,
+        output_dir=run_root / "figures" / "sweep",
+    )
+    study_figures = generate_study_figures(
+        report=best_report,
+        output_dir=run_root / "figures" / "best_model",
+    )
+
+    artifact = {
+        "run_root": str(run_root.resolve()),
+        "resolved_config": str(resolved_cfg_path.resolve()),
+        "resolved_sweep_config": str(resolved_sweep_path.resolve()),
+        "sweep_summary_json": str((Path(str(sweep_summary["output_dir"])) / "summary.json").resolve()),
+        "sweep_summary_csv": str(summary_csv.resolve()),
+        "best_run_name": best_run_name,
+        "best_sae_config": asdict(best_sae_cfg),
+        "best_study_report": str(report_path.resolve()),
+        "figures": {
+            "sweep": [str(path.resolve()) for path in sweep_figures],
+            "best_model": [str(path.resolve()) for path in study_figures],
+        },
+    }
+    write_json(artifact, run_root / "run_summary.json")
+    return artifact
+
+
+def create_timestamped_run_dir(base_output_root: str | Path, run_name: str | None = None) -> Path:
+    base = Path(base_output_root).expanduser() / "runs"
+    base.mkdir(parents=True, exist_ok=True)
+
+    stem = run_name or datetime.now().strftime("%Y%m%d_%H%M%S")
+    candidate = base / stem
+    if not candidate.exists():
+        candidate.mkdir(parents=True, exist_ok=True)
+        return candidate
+
+    suffix = 1
+    while True:
+        candidate = base / f"{stem}_{suffix:02d}"
+        if not candidate.exists():
+            candidate.mkdir(parents=True, exist_ok=True)
+            return candidate
+        suffix += 1
+
+
+def _load_or_default_sweep_payload(
+    sweep_config_path: str | None,
+    base_sae_cfg: SAEConfig,
+) -> dict[str, Any]:
+    if sweep_config_path:
+        path = Path(sweep_config_path).expanduser()
+        if path.exists():
+            with path.open("r", encoding="utf-8") as handle:
+                payload = yaml.safe_load(handle)
+            if isinstance(payload, dict) and isinstance(payload.get("runs"), list) and payload["runs"]:
+                return payload
+            raise ValueError(f"Invalid sweep config format: {path}")
+        logger.warning("Sweep config not found at %s; using autogenerated default runs.", path)
+
+    half_latent = max(128, int(base_sae_cfg.latent_dim // 2))
+    double_latent = int(base_sae_cfg.latent_dim * 2)
+    return {
+        "runs": [
+            {
+                "name": f"l1_latent{half_latent}",
+                "sae": {
+                    "variant": "l1",
+                    "latent_dim": half_latent,
+                    "l1_lambda": base_sae_cfg.l1_lambda,
+                    "epochs": base_sae_cfg.epochs,
+                    "batch_size": base_sae_cfg.batch_size,
+                },
+            },
+            {
+                "name": f"l1_latent{base_sae_cfg.latent_dim}",
+                "sae": {
+                    "variant": "l1",
+                    "latent_dim": base_sae_cfg.latent_dim,
+                    "l1_lambda": base_sae_cfg.l1_lambda,
+                    "epochs": base_sae_cfg.epochs,
+                    "batch_size": base_sae_cfg.batch_size,
+                },
+            },
+            {
+                "name": f"topk_latent{base_sae_cfg.latent_dim}_k{base_sae_cfg.topk_k}",
+                "sae": {
+                    "variant": "topk",
+                    "latent_dim": base_sae_cfg.latent_dim,
+                    "topk_k": base_sae_cfg.topk_k,
+                    "epochs": base_sae_cfg.epochs,
+                    "batch_size": base_sae_cfg.batch_size,
+                },
+            },
+            {
+                "name": f"topk_latent{double_latent}_k{base_sae_cfg.topk_k}",
+                "sae": {
+                    "variant": "topk",
+                    "latent_dim": double_latent,
+                    "topk_k": base_sae_cfg.topk_k,
+                    "epochs": base_sae_cfg.epochs,
+                    "batch_size": base_sae_cfg.batch_size,
+                },
+            },
+        ]
+    }
+
+
+def _select_best_run(summary: pd.DataFrame) -> str:
+    if summary.empty:
+        raise ValueError("SAE sweep summary is empty; cannot select best run.")
+
+    scored = summary.copy()
+    for column in ["reconstruction_mse", "concept_probe_macro_auroc_gap", "concept_probe_macro_accuracy_gap"]:
+        if column in scored.columns:
+            scored[column] = -scored[column].astype(float)
+
+    target_cols = [
+        col
+        for col in [
+            "mean_disentanglement",
+            "mean_pathology_max_abs_corr",
+            "concept_probe_macro_auroc",
+            "concept_probe_worst_group_macro_auroc",
+            "reconstruction_mse",
+            "concept_probe_macro_auroc_gap",
+        ]
+        if col in scored.columns
+    ]
+    if not target_cols:
+        return str(summary.iloc[0]["run_name"])
+
+    total = pd.Series(0.0, index=scored.index)
+    for col in target_cols:
+        series = scored[col].astype(float)
+        std = float(series.std(ddof=0))
+        if std <= 1e-12:
+            continue
+        total += (series - float(series.mean())) / std
+
+    best_index = total.astype(float).idxmax()
+    return str(scored.loc[best_index, "run_name"])
+
+
+def _extract_sae_config_for_run(
+    base_cfg: SAEConfig,
+    sweep_payload: dict[str, Any],
+    run_name: str,
+) -> SAEConfig:
+    runs = sweep_payload.get("runs", [])
+    for run in runs:
+        if str(run.get("name")) != run_name:
+            continue
+        overrides = run.get("sae", {})
+        return replace(base_cfg, **overrides)
+    raise ValueError(f"Could not find SAE run '{run_name}' in sweep payload.")
+
+
+def _write_config_snapshot(cfg: ExperimentConfig, output_path: Path) -> Path:
+    return _write_yaml(asdict(cfg), output_path)
+
+
+def _write_yaml(payload: dict[str, Any], output_path: Path) -> Path:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(payload, handle, sort_keys=False)
+    return output_path

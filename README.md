@@ -83,9 +83,33 @@ End-to-end:
 chex-run-study --config configs/default.yaml
 ```
 
+By default, `chex-run-study` now runs a **comprehensive multi-SAE study**:
+
+1. Runs an SAE sweep (L1 + top-k variants / hyperparameters).
+2. Selects the best SAE run by a composite objective over reconstruction, disentanglement, correlation, and fairness-aware probe metrics.
+3. Runs full baseline vs SAE vs debiased fairness analysis with the selected SAE.
+4. Exports publication-ready figures.
+
+Every run is saved into a timestamped directory so no results are overwritten:
+
+- `<output_root>/runs/YYYYMMDD_HHMMSS/`
+- key artifacts: `run_summary.json`, `configs/`, `sae_sweep/`, `workspace/study_metrics.json`, `figures/`
+
+Publication-ready figures are saved under:
+
+- `figures/sweep/`: hyperparameter ranking, disentanglement-vs-correlation, fairness-performance tradeoff, metric scorecard
+- `figures/best_model/`: baseline vs SAE vs debiased performance/fairness, per-group results, top age-associated latents, SAE training curve
+
+Run a single SAE only (legacy behavior):
+
+```bash
+chex-run-study --config configs/default.yaml --single-sae
+```
+
 Live progress is logged to console and to a file by default:
 
-- default file: `<output_root>/logs/run_study.log`
+- default file (comprehensive mode): `<output_root>/runs/<timestamp>/logs/run_study.log`
+- default file (single-SAE mode): `<output_root>/logs/run_study.log`
 - control verbosity with `--log-level` (e.g. `INFO`, `DEBUG`)
 - override file path with `--log-file /path/to/run.log`
 
