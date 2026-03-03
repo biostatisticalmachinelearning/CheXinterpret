@@ -24,6 +24,7 @@ dependencies = [
   "matplotlib>=3.8",
   "seaborn>=0.13",
   "rich>=13.7",
+  "accelerate>=1.0",
 ]
 
 [project.optional-dependencies]

@@ -27,7 +27,7 @@ pip install -e .
 
 Dependencies are managed in `pyproject.toml` and include:
 
-- `torch`, `transformers`, `einops` (CheXagent loading)
+- `torch`, `transformers`, `einops`, `accelerate` (CheXagent loading)
 - `numpy`, `pandas`, `scikit-learn`, `scipy`
 - `matplotlib`, `seaborn`
 
@@ -113,10 +113,18 @@ The loader uses:
 - `AutoProcessor.from_pretrained(..., trust_remote_code=True)`
 - `AutoModelForCausalLM.from_pretrained(..., trust_remote_code=True)`
 
-Feature extraction is vision-side (not text-generation output):
+After loading, only the visual encoder is retained: `model = model.vision_model`.
 
-- preferred: `model.get_image_features(...)`
-- fallback: vision/image hidden outputs (`image_embeds`, `vision_embeds`, etc.)
+The CheXagent processor's `__call__` stacks all images in a batch and unsqueezes a
+leading batch dimension, producing `[1, N, C, H, W]` — treating the entire list as one
+multi-image study. For per-image feature extraction we call `processor.image_processor`
+directly (the underlying `BlipImageProcessor`), which returns `[B, C, H, W]` with one
+row per image, and forward that through `vision_model`.
+
+Feature extraction priority (vision-side only, no text-generation output):
+
+- preferred: `model.get_image_features(**inputs)`
+- fallback: vision/image hidden outputs (`last_hidden_state`, `image_embeds`, `vision_embeds`, `hidden_states[-1]`, etc.)
 
 Model/processor artifacts are cached under `features.cache_dir`.
 

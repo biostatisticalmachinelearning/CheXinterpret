@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 import numpy as np
 import pandas as pd
@@ -68,7 +68,7 @@ def evaluate_disentanglement(
         "mean_disentanglement": mean_disentanglement,
         "mean_performance": mean_performance,
         "mean_top_weight_share": mean_top_weight_share,
-        "concept_metrics": [m.__dict__ for m in metrics],
+        "concept_metrics": [asdict(m) for m in metrics],
     }
 
 

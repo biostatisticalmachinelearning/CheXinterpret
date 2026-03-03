@@ -1,9 +1,9 @@
 seed: 13
 
 paths:
-  image_root: "/path/to/chexpert_plus"
-  metadata_csv: "/path/to/chexpert_plus/df_chexpert_plus_240401.csv"
-  chexbert_labels_json: "/path/to/chexpert_plus/chexbert_labels.zip"
+  image_root: "/media/little/da540527-69ef-4f3f-8a3f-9cf32c6afd6c/chexpert-plus/PNG/"
+  metadata_csv: "/home/little/Repositories/CheXinterpret/data-downloads/df_chexpert_plus_240401.csv"
+  chexbert_labels_json: "/home/little/Repositories/CheXinterpret/data-downloads/chexbert_labels.zip"
   output_root: "outputs/default"
 
 schema:

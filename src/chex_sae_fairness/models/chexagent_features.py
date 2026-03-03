@@ -42,7 +42,6 @@ class CheXagentVisionFeatureExtractor:
             cfg.model_name,
             trust_remote_code=True,
             cache_dir=cache_dir,
-            device_map="auto",
         )
         logger.info("Loading CheXagent model weights for %s", cfg.model_name)
         self.model = _load_chexagent_model_strict(
@@ -50,6 +49,7 @@ class CheXagentVisionFeatureExtractor:
             torch_dtype=self.model_dtype,
             cache_dir=cache_dir,
         )
+        self.model = self.model.vision_model
         self.model.eval().to(self.device)
 
         if self.model_dtype == torch.float16 and self.device.type == "cuda":
@@ -99,39 +99,30 @@ class CheXagentVisionFeatureExtractor:
         return output
 
     def _encode_images(self, images: list[Any]) -> torch.Tensor:
-        # Mirror the official HF usage: multimodal prompt + image batch.
-        # We still extract vision-side embeddings rather than generated text.
+        # Use the underlying image processor directly rather than the full CheXagent
+        # processor. The full processor's __call__ is designed for multi-image-per-study
+        # inputs: it stacks all images and calls .unsqueeze(0), returning
+        # [1, num_images, C, H, W] — treating the whole list as one study with N views.
+        # For batched per-image feature extraction we want [B, C, H, W], so we call
+        # the BlipImageProcessor sub-processor directly.
         model_inputs = _to_device_tensors(
-            self.processor(
+            self.processor.image_processor(
                 images=images,
-                text=_prompt_batch(len(images)),
                 return_tensors="pt",
-                padding=True,
             ),
             self.device,
             dtype=self.model_dtype,
         )
-        image_only_inputs = _to_device_tensors(
-            self.processor(images=images, return_tensors="pt"),
-            self.device,
-            dtype=self.model_dtype,
-        )
+        # pixel_values is now [B, C, H, W] — one row per image, no crop dimension.
 
         if hasattr(self.model, "get_image_features"):
             try:
-                image_features = self.model.get_image_features(**image_only_inputs)
+                image_features = self.model.get_image_features(**model_inputs)
                 return _pool_features(image_features, self.cfg.pooling)
             except Exception as exc:  # pragma: no cover - backend/model dependent
                 logger.debug("get_image_features failed; falling back to model forward: %s", exc)
 
-        outputs = _forward_with_fallback_inputs(
-            model=self.model,
-            processor=self.processor,
-            images=images,
-            device=self.device,
-            primary_inputs=model_inputs,
-            dtype=self.model_dtype,
-        )
+        outputs = _forward_vision_model(self.model, model_inputs)
         return _extract_features_from_outputs(outputs, self.cfg.pooling)
 
 
@@ -201,36 +192,16 @@ def _to_device_tensors(
     return out
 
 
-def _forward_with_fallback_inputs(
+def _forward_vision_model(
     model: torch.nn.Module,
-    processor: Any,
-    images: list[Any],
-    device: torch.device,
     primary_inputs: dict[str, Any],
-    dtype: torch.dtype | None,
 ) -> Any:
     try:
         return model(**primary_inputs, output_hidden_states=True, return_dict=True)
-    except Exception as primary_exc:  # pragma: no cover - backend/model dependent
-        # Some multimodal causal LMs require text tokens even when extracting image features.
-        try:
-            text_inputs = _to_device_tensors(
-                processor(
-                    images=images,
-                    text=[""] * len(images),
-                    return_tensors="pt",
-                    padding=True,
-                ),
-                device,
-                dtype=dtype,
-            )
-            return model(**text_inputs, output_hidden_states=True, return_dict=True)
-        except Exception as secondary_exc:
-            raise RuntimeError(
-                "Model forward failed for both image-only and image+empty-text inputs. "
-                f"image-only error: {type(primary_exc).__name__}: {primary_exc} | "
-                f"image+text error: {type(secondary_exc).__name__}: {secondary_exc}"
-            ) from secondary_exc
+    except Exception as exc:
+        raise RuntimeError(
+            f"Vision model forward failed: {type(exc).__name__}: {exc}"
+        ) from exc
 
 
 def _extract_features_from_outputs(outputs: Any, pooling: str) -> torch.Tensor:
