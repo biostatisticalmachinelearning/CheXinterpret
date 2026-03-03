@@ -20,6 +20,7 @@ By default, the pipeline is cache-first for CheXagent embeddings:
 
 - If `features.npz` exists, it is reused.
 - New embeddings are extracted only when the cache is missing (or when `features.force_recompute: true`).
+- CheXagent checkpoints are loaded from `features.cache_dir` first; the pipeline only hits Hugging Face if the local cache is missing.
 
 ## Repository Layout
 

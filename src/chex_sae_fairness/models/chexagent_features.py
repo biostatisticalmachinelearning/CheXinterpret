@@ -34,7 +34,6 @@ class CheXagentVisionFeatureExtractor:
         self.cfg = cfg
         self.device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
         self.model_dtype = _resolve_model_dtype(cfg.precision, self.device)
-        _install_transformers_compat_shims()
         cache_dir = _resolve_cache_dir(cfg.cache_dir)
         self.cache_dir = cache_dir
 
@@ -43,6 +42,7 @@ class CheXagentVisionFeatureExtractor:
             cfg.model_name,
             trust_remote_code=True,
             cache_dir=cache_dir,
+            device_map="auto",
         )
         logger.info("Loading CheXagent model weights for %s", cfg.model_name)
         self.model = _load_chexagent_model_strict(
@@ -319,21 +319,6 @@ def _resolve_model_dtype(precision: str, device: torch.device) -> torch.dtype | 
 def _prompt_batch(batch_size: int) -> list[str]:
     prompt = ' USER: <s>Describe this chest x-ray image. ASSISTANT: <s>'
     return [prompt] * batch_size
-
-
-def _install_transformers_compat_shims() -> None:
-    # Some remote-code checkpoints import a misspelled helper name from
-    # `transformers.pytorch_utils`. Add an alias to keep loading robust across
-    # Transformers versions.
-    try:
-        pytorch_utils = transformers.pytorch_utils
-    except Exception:
-        return
-    if hasattr(pytorch_utils, "find_pruneable_heads_and_indicies"):
-        return
-    canonical = getattr(pytorch_utils, "find_pruneable_heads_and_indices", None)
-    if canonical is not None:
-        setattr(pytorch_utils, "find_pruneable_heads_and_indicies", canonical)
 
 
 def _resolve_cache_dir(value: str | None) -> str | None:
