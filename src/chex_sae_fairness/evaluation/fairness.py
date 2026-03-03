@@ -11,20 +11,34 @@ def evaluate_multilabel_predictions(
     y_true: np.ndarray,
     y_score: np.ndarray,
     label_names: list[str],
+    threshold: float = 0.5,
 ) -> dict[str, object]:
-    per_label: dict[str, float] = {}
+    # We report both ranking quality (AUROC) and thresholded correctness metrics
+    # because fairness interventions can change calibration at a fixed threshold.
+    per_label_auroc: dict[str, float] = {}
+    per_label_accuracy: dict[str, float] = {}
 
     for idx, label in enumerate(label_names):
         y = y_true[:, idx]
         s = y_score[:, idx]
         if len(np.unique(y)) < 2:
-            continue
-        per_label[label] = float(roc_auc_score(y, s))
+            per_label_auroc[label] = float("nan")
+        else:
+            per_label_auroc[label] = float(roc_auc_score(y, s))
+        per_label_accuracy[label] = float(np.mean((s >= threshold).astype(int) == y.astype(int)))
 
-    macro_auroc = float(np.mean(list(per_label.values()))) if per_label else float("nan")
+    valid_aurocs = [score for score in per_label_auroc.values() if not math.isnan(score)]
+    macro_auroc = float(np.mean(valid_aurocs)) if valid_aurocs else float("nan")
+    macro_accuracy = float(np.mean(list(per_label_accuracy.values()))) if per_label_accuracy else float("nan")
+    micro_accuracy = float(
+        np.mean((y_score >= threshold).astype(int) == y_true.astype(int))
+    )
     return {
         "macro_auroc": macro_auroc,
-        "label_auroc": per_label,
+        "macro_accuracy": macro_accuracy,
+        "micro_accuracy": micro_accuracy,
+        "label_auroc": per_label_auroc,
+        "label_accuracy": per_label_accuracy,
     }
 
 
@@ -41,7 +55,12 @@ def evaluate_group_fairness(
 
     for group in unique_groups:
         mask = groups == group
-        group_eval = evaluate_multilabel_predictions(y_true[mask], y_score[mask], label_names)
+        group_eval = evaluate_multilabel_predictions(
+            y_true[mask],
+            y_score[mask],
+            label_names,
+            threshold=threshold,
+        )
         odds = _equalized_odds_components(y_true[mask], y_score[mask], threshold)
         group_metrics[str(group)] = {
             **group_eval,
@@ -49,8 +68,23 @@ def evaluate_group_fairness(
             "n": int(mask.sum()),
         }
 
-    macro_scores = [group_metrics[g]["macro_auroc"] for g in group_metrics if not math.isnan(group_metrics[g]["macro_auroc"])]
+    macro_scores = [
+        group_metrics[g]["macro_auroc"]
+        for g in group_metrics
+        if not math.isnan(group_metrics[g]["macro_auroc"])
+    ]
+    macro_accuracy_scores = [
+        group_metrics[g]["macro_accuracy"]
+        for g in group_metrics
+        if not math.isnan(group_metrics[g]["macro_accuracy"])
+    ]
+
     auroc_gap = float(np.max(macro_scores) - np.min(macro_scores)) if macro_scores else float("nan")
+    accuracy_gap = (
+        float(np.max(macro_accuracy_scores) - np.min(macro_accuracy_scores))
+        if macro_accuracy_scores
+        else float("nan")
+    )
 
     tpr_values = [group_metrics[g]["macro_tpr"] for g in group_metrics if not math.isnan(group_metrics[g]["macro_tpr"])]
     fpr_values = [group_metrics[g]["macro_fpr"] for g in group_metrics if not math.isnan(group_metrics[g]["macro_fpr"])]
@@ -59,10 +93,17 @@ def evaluate_group_fairness(
     eo_fpr_gap = float(np.max(fpr_values) - np.min(fpr_values)) if fpr_values else float("nan")
 
     bootstrap = _bootstrap_auroc_gap(y_true, y_score, groups, label_names, bootstrap_samples)
+    overall = evaluate_multilabel_predictions(y_true, y_score, label_names, threshold=threshold)
+    worst_group_auroc = _worst_group_metric(group_metrics, "macro_auroc")
+    worst_group_accuracy = _worst_group_metric(group_metrics, "macro_accuracy")
 
     return {
         "groups": group_metrics,
+        "overall": overall,
         "macro_auroc_gap": auroc_gap,
+        "macro_accuracy_gap": accuracy_gap,
+        "worst_group_macro_auroc": worst_group_auroc,
+        "worst_group_macro_accuracy": worst_group_accuracy,
         "equalized_odds_tpr_gap": eo_tpr_gap,
         "equalized_odds_fpr_gap": eo_fpr_gap,
         "bootstrap_macro_auroc_gap": bootstrap,
@@ -130,7 +171,11 @@ def _bootstrap_auroc_gap(
         group_scores: list[float] = []
         for g in sorted(np.unique(gs).tolist()):
             mask = gs == g
-            eval_dict = evaluate_multilabel_predictions(ys[mask], ps[mask], label_names)
+            eval_dict = evaluate_multilabel_predictions(
+                ys[mask],
+                ps[mask],
+                label_names,
+            )
             if not math.isnan(eval_dict["macro_auroc"]):
                 group_scores.append(eval_dict["macro_auroc"])
 
@@ -145,3 +190,18 @@ def _bootstrap_auroc_gap(
         "p05": float(np.quantile(gaps, 0.05)),
         "p95": float(np.quantile(gaps, 0.95)),
     }
+
+
+def _worst_group_metric(
+    group_metrics: dict[str, dict[str, object]],
+    metric: str,
+) -> dict[str, object] | None:
+    candidates: list[tuple[str, float]] = []
+    for group, values in group_metrics.items():
+        value = values.get(metric)
+        if isinstance(value, (float, np.floating)) and not math.isnan(float(value)):
+            candidates.append((group, float(value)))
+    if not candidates:
+        return None
+    group, score = min(candidates, key=lambda x: x[1])
+    return {"group": group, "value": score}

@@ -236,7 +236,8 @@ def _alias_options_for_target(target: str) -> list[str]:
         ("race", "patient_race"),
         ("ethnicity", "patient_ethnicity"),
         ("insurance_type", "patient_insurance_type"),
-        ("interpreter_needed", "patient_primary_language", "primary_language"),
+        ("interpreter_needed",),
+        ("patient_primary_language", "primary_language"),
         ("recent_bmi", "patient_recent_bmi", "bmi"),
         ("deceased", "patient_deceased", "is_deceased"),
     ]

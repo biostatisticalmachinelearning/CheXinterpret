@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 import logging
 import time
 from pathlib import Path
@@ -11,6 +12,7 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from chex_sae_fairness.config import ExperimentConfig
 from chex_sae_fairness.data.feature_cache import load_or_create_feature_bundle
+from chex_sae_fairness.data.splits import build_split_masks
 from chex_sae_fairness.evaluation.disentanglement import (
     evaluate_disentanglement,
     reconstruction_metrics,
@@ -18,6 +20,7 @@ from chex_sae_fairness.evaluation.disentanglement import (
 )
 from chex_sae_fairness.evaluation.fairness import evaluate_group_fairness, evaluate_multilabel_predictions
 from chex_sae_fairness.mitigation.concept_debias import (
+    apply_age_residualization,
     fit_concept_residualizer,
     rank_age_associated_concepts,
 )
@@ -53,20 +56,27 @@ def run_full_study(config_path: str) -> dict[str, object]:
     metadata_cols = [str(c) for c in bundle["metadata_cols"].tolist()]
     metadata_df = pd.DataFrame(bundle["metadata"], columns=metadata_cols)
 
-    train_mask, valid_mask, test_mask = _split_masks(
+    split_masks = build_split_masks(
         splits,
         valid_name=cfg.data.validation_split_name,
         test_name=cfg.data.test_split_name,
+        context="feature bundle",
     )
+    if split_masks.used_valid_as_test:
+        logger.warning(
+            "No '%s' split found. Using '%s' split as test and training SAE/probes on remaining rows.",
+            cfg.data.test_split_name,
+            cfg.data.validation_split_name,
+        )
 
-    x_train, x_valid, x_test = x[train_mask], x[valid_mask], x[test_mask]
-    y_train, y_test = pathologies[train_mask], pathologies[test_mask]
+    x_train, x_valid, x_test = x[split_masks.train], x[split_masks.valid], x[split_masks.test]
+    y_train, y_test = pathologies[split_masks.train], pathologies[split_masks.test]
 
-    metadata_train = metadata_df.loc[train_mask].reset_index(drop=True)
-    metadata_test = metadata_df.loc[test_mask].reset_index(drop=True)
+    metadata_train = metadata_df.loc[split_masks.train].reset_index(drop=True)
+    metadata_test = metadata_df.loc[split_masks.test].reset_index(drop=True)
 
-    age_groups_train = bundle["age_group"][train_mask].astype(str)
-    age_groups_test = bundle["age_group"][test_mask].astype(str)
+    age_groups_train = bundle["age_group"][split_masks.train].astype(str)
+    age_groups_test = bundle["age_group"][split_masks.test].astype(str)
 
     resolved_device = _resolve_device(cfg.features.device)
     if resolved_device != cfg.features.device:
@@ -77,9 +87,9 @@ def run_full_study(config_path: str) -> dict[str, object]:
         )
     logger.info(
         "Split sizes: train=%d, valid=%d, test=%d",
-        int(train_mask.sum()),
-        int(valid_mask.sum()),
-        int(test_mask.sum()),
+        int(split_masks.train.sum()),
+        int(split_masks.valid.sum()),
+        int(split_masks.test.sum()),
     )
     logger.info(
         "Training SAE (variant=%s, latent_dim=%d, epochs=%d, batch_size=%d, device=%s).",
@@ -131,12 +141,26 @@ def run_full_study(config_path: str) -> dict[str, object]:
     )
 
     logger.info("Training baseline probe on raw CheXagent features.")
-    baseline_probe = fit_multilabel_probe(x_train, y_train)
-    baseline_scores = baseline_probe.predict_proba(x_test)
+    baseline_perf, baseline_fairness = _fit_and_evaluate_probe(
+        x_train=x_train,
+        x_test=x_test,
+        y_train=y_train,
+        y_test=y_test,
+        age_groups_test=age_groups_test,
+        pathology_cols=path_cols,
+        cfg=cfg,
+    )
 
     logger.info("Training probe on SAE concept features.")
-    concept_probe = fit_multilabel_probe(z_train, y_train)
-    concept_scores = concept_probe.predict_proba(z_test)
+    concept_perf, concept_fairness = _fit_and_evaluate_probe(
+        x_train=z_train,
+        x_test=z_test,
+        y_train=y_train,
+        y_test=y_test,
+        age_groups_test=age_groups_test,
+        pathology_cols=path_cols,
+        cfg=cfg,
+    )
 
     logger.info("Fitting concept residualizer for age-group debiasing.")
     residualizer = fit_concept_residualizer(
@@ -144,40 +168,24 @@ def run_full_study(config_path: str) -> dict[str, object]:
         age_groups=age_groups_train,
         strength=cfg.fairness.debias_strength,
     )
-    z_train_debiased = residualizer.transform(z_train, age_groups_train)
-    z_test_debiased = residualizer.transform(z_test, age_groups_test)
-
-    debiased_probe = fit_multilabel_probe(z_train_debiased, y_train)
-    debiased_scores = debiased_probe.predict_proba(z_test_debiased)
-
-    logger.info("Evaluating pathology performance and age-group fairness metrics.")
-    baseline_perf = evaluate_multilabel_predictions(y_test, baseline_scores, path_cols)
-    concept_perf = evaluate_multilabel_predictions(y_test, concept_scores, path_cols)
-    debiased_perf = evaluate_multilabel_predictions(y_test, debiased_scores, path_cols)
-
-    baseline_fairness = evaluate_group_fairness(
-        y_true=y_test,
-        y_score=baseline_scores,
-        groups=age_groups_test,
-        label_names=path_cols,
-        threshold=cfg.fairness.threshold,
-        bootstrap_samples=cfg.fairness.bootstrap_samples,
+    z_train_debiased, z_test_debiased = apply_age_residualization(
+        residualizer=residualizer,
+        z_train=z_train,
+        z_test=z_test,
+        age_groups_train=age_groups_train,
+        age_groups_test=age_groups_test,
+        mode=cfg.fairness.debias_mode,
     )
-    concept_fairness = evaluate_group_fairness(
-        y_true=y_test,
-        y_score=concept_scores,
-        groups=age_groups_test,
-        label_names=path_cols,
-        threshold=cfg.fairness.threshold,
-        bootstrap_samples=cfg.fairness.bootstrap_samples,
-    )
-    debiased_fairness = evaluate_group_fairness(
-        y_true=y_test,
-        y_score=debiased_scores,
-        groups=age_groups_test,
-        label_names=path_cols,
-        threshold=cfg.fairness.threshold,
-        bootstrap_samples=cfg.fairness.bootstrap_samples,
+
+    logger.info("Training probe on debiased SAE concepts (%s).", cfg.fairness.debias_mode)
+    debiased_perf, debiased_fairness = _fit_and_evaluate_probe(
+        x_train=z_train_debiased,
+        x_test=z_test_debiased,
+        y_train=y_train,
+        y_test=y_test,
+        age_groups_test=age_groups_test,
+        pathology_cols=path_cols,
+        cfg=cfg,
     )
 
     logger.info("Running disentanglement and latent-correlation analyses.")
@@ -204,13 +212,21 @@ def run_full_study(config_path: str) -> dict[str, object]:
 
     report = {
         "config_path": str(Path(config_path).resolve()),
+        "config": asdict(cfg),
         "counts": {
             "n_total": int(len(splits)),
-            "n_train": int(train_mask.sum()),
-            "n_valid": int(valid_mask.sum()),
-            "n_test": int(test_mask.sum()),
+            "n_train": int(split_masks.train.sum()),
+            "n_valid": int(split_masks.valid.sum()),
+            "n_test": int(split_masks.test.sum()),
+            "used_valid_as_test": bool(split_masks.used_valid_as_test),
             "manifest_rows_dropped": int(feature_result.manifest_rows_dropped),
             "used_cached_features": bool(feature_result.used_cache),
+        },
+        "debiasing": {
+            "method": "age_group_residualization",
+            "mode": cfg.fairness.debias_mode,
+            "strength": cfg.fairness.debias_strength,
+            "fairness_threshold": cfg.fairness.threshold,
         },
         "sae": {
             "train_curve": sae_output.train_curve,
@@ -243,27 +259,37 @@ def run_full_study(config_path: str) -> dict[str, object]:
     return report
 
 
-def _split_masks(
-    splits: np.ndarray,
-    valid_name: str,
-    test_name: str,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    test_mask = splits == test_name
-    valid_mask = splits == valid_name
-    train_mask = ~(test_mask | valid_mask)
-
-    if valid_mask.sum() == 0:
-        valid_mask = train_mask.copy()
-
-    if test_mask.sum() == 0:
-        raise ValueError(
-            f"No rows found for test split '{test_name}'. Check `schema.split_col` and split values."
-        )
-
-    if train_mask.sum() == 0:
-        raise ValueError("No rows left for train split after removing valid/test rows.")
-
-    return train_mask, valid_mask, test_mask
+def _fit_and_evaluate_probe(
+    x_train: np.ndarray,
+    x_test: np.ndarray,
+    y_train: np.ndarray,
+    y_test: np.ndarray,
+    age_groups_test: np.ndarray,
+    pathology_cols: list[str],
+    cfg: ExperimentConfig,
+) -> tuple[dict[str, object], dict[str, object]]:
+    probe = fit_multilabel_probe(
+        x_train,
+        y_train,
+        max_iter=cfg.probes.max_iter,
+        c_value=cfg.probes.c_value,
+    )
+    scores = probe.predict_proba(x_test)
+    performance = evaluate_multilabel_predictions(
+        y_test,
+        scores,
+        pathology_cols,
+        threshold=cfg.fairness.threshold,
+    )
+    fairness = evaluate_group_fairness(
+        y_true=y_test,
+        y_score=scores,
+        groups=age_groups_test,
+        label_names=pathology_cols,
+        threshold=cfg.fairness.threshold,
+        bootstrap_samples=cfg.fairness.bootstrap_samples,
+    )
+    return performance, fairness
 
 
 def _resolve_device(requested: str) -> str:

@@ -62,3 +62,40 @@ def rank_age_associated_concepts(
 
     scores.sort(key=lambda x: x[1], reverse=True)
     return [{"latent_index": int(dim), "age_assoc_score": float(score)} for dim, score in scores[:top_k]]
+
+
+def apply_age_residualization(
+    residualizer: ConceptResidualizer,
+    z_train: np.ndarray,
+    z_test: np.ndarray,
+    age_groups_train: np.ndarray,
+    age_groups_test: np.ndarray,
+    mode: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    canonical_mode = _canonicalize_debias_mode(mode)
+    # `train_and_test` debiases both train/test representations.
+    # `test_only` preserves training features and applies intervention only at inference.
+    if canonical_mode == "train_and_test":
+        return (
+            residualizer.transform(z_train, age_groups_train),
+            residualizer.transform(z_test, age_groups_test),
+        )
+    if canonical_mode == "test_only":
+        return z_train, residualizer.transform(z_test, age_groups_test)
+    raise ValueError(f"Unsupported debias mode: {mode}")
+
+
+def _canonicalize_debias_mode(mode: str) -> str:
+    value = str(mode).strip().lower()
+    aliases = {
+        "train_and_test": "train_and_test",
+        "train+test": "train_and_test",
+        "both": "train_and_test",
+        "test_only": "test_only",
+        "test": "test_only",
+    }
+    if value not in aliases:
+        raise ValueError(
+            f"Unknown debias mode '{mode}'. Use one of: train_and_test, test_only."
+        )
+    return aliases[value]

@@ -24,6 +24,8 @@ def fit_multilabel_probe(
     max_iter: int = 2000,
     c_value: float = 1.0,
 ) -> MultilabelProbe:
+    # Linear probe with per-label one-vs-rest heads gives stable performance and
+    # straightforward interpretability for feature-space comparisons.
     scaler = StandardScaler()
     x_scaled = scaler.fit_transform(x_train)
 

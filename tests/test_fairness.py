@@ -42,5 +42,8 @@ def test_group_fairness_zero_gap_for_equal_performance() -> None:
     )
 
     assert result["macro_auroc_gap"] == 0.0
+    assert result["macro_accuracy_gap"] == 0.0
     assert result["equalized_odds_tpr_gap"] == 0.0
     assert result["equalized_odds_fpr_gap"] == 0.0
+    assert result["worst_group_macro_auroc"] is not None
+    assert result["worst_group_macro_accuracy"] is not None

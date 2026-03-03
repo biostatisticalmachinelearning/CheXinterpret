@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+import warnings
 
 import yaml
 
@@ -64,10 +65,8 @@ class SAEConfig:
 
 @dataclass(slots=True)
 class ProbeConfig:
-    learning_rate: float = 1e-3
-    weight_decay: float = 1e-5
-    batch_size: int = 1024
-    epochs: int = 30
+    c_value: float = 1.0
+    max_iter: int = 2000
 
 
 @dataclass(slots=True)
@@ -75,6 +74,7 @@ class FairnessConfig:
     target_metric: str = "macro_auroc"
     bootstrap_samples: int = 200
     debias_strength: float = 1.0
+    debias_mode: str = "train_and_test"
     threshold: float = 0.5
 
 
@@ -99,7 +99,7 @@ class ExperimentConfig:
             data=DataConfig(**payload.get("data", {})),
             features=FeatureConfig(**payload["features"]),
             sae=SAEConfig(**payload["sae"]),
-            probes=ProbeConfig(**payload.get("probes", {})),
+            probes=_parse_probe_config(payload.get("probes", {})),
             fairness=FairnessConfig(**payload.get("fairness", {})),
         )
 
@@ -133,3 +133,18 @@ def _read_yaml(config_path: str | Path) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("Config file must contain a YAML object.")
     return payload
+
+
+def _parse_probe_config(raw: dict[str, Any] | None) -> ProbeConfig:
+    payload = dict(raw or {})
+    valid_keys = set(ProbeConfig.__dataclass_fields__.keys())
+    unknown = sorted(set(payload.keys()) - valid_keys)
+    if unknown:
+        warnings.warn(
+            "Ignoring unknown probe config keys: " + ", ".join(unknown),
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        for key in unknown:
+            payload.pop(key, None)
+    return ProbeConfig(**payload)

@@ -85,7 +85,7 @@ def test_aliases_current_columns_to_legacy_patient_prefixed_targets() -> None:
             "race": ["White"],
             "ethnicity": ["Non-Hispanic"],
             "insurance_type": ["Medicare"],
-            "interpreter_needed": [0],
+            "primary_language": ["English"],
         }
     )
 
@@ -97,3 +97,26 @@ def test_aliases_current_columns_to_legacy_patient_prefixed_targets() -> None:
     assert "patient_ethnicity" in aliased.columns
     assert "patient_insurance_type" in aliased.columns
     assert "patient_primary_language" in aliased.columns
+
+
+def test_does_not_map_interpreter_needed_to_primary_language() -> None:
+    cfg = _make_cfg(
+        metadata_cols=["patient_primary_language"],
+        age_col="age",
+        sex_col="sex",
+        race_col="race",
+    )
+    frame = pd.DataFrame(
+        {
+            "path_to_image": ["train/patient00001/study1/view1_frontal.jpg"],
+            "split": ["train"],
+            "age": [55],
+            "sex": ["F"],
+            "race": ["Asian"],
+            "interpreter_needed": [1],
+        }
+    )
+
+    aliased = _apply_common_column_aliases(frame, cfg)
+
+    assert "patient_primary_language" not in aliased.columns

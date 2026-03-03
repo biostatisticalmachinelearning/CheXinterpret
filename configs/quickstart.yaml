@@ -60,13 +60,12 @@ sae:
   eval_every_epochs: 1
 
 probes:
-  learning_rate: 1.0e-3
-  weight_decay: 1.0e-5
-  batch_size: 128
-  epochs: 5
+  c_value: 1.0
+  max_iter: 2000
 
 fairness:
   target_metric: "macro_auroc"
   bootstrap_samples: 20
   debias_strength: 1.0
+  debias_mode: "train_and_test"
   threshold: 0.5

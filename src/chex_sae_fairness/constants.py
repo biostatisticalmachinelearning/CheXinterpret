@@ -20,8 +20,8 @@ METADATA_8 = [
     "sex",
     "race",
     "ethnicity",
-    "insurance",
-    "language",
-    "zip_income_quartile",
-    "inpatient",
+    "interpreter_needed",
+    "insurance_type",
+    "recent_bmi",
+    "deceased",
 ]

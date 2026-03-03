@@ -52,6 +52,8 @@ Update `configs/default.yaml` with your local paths and schema:
 - `schema.pathology_cols`: should match your 14 pathology columns from CheXbert labels.
 - `schema.metadata_cols`: metadata columns from the CSV (CheXpert Plus commonly uses `age`, `sex`, `race`, `ethnicity`, `interpreter_needed`, `insurance_type`, `recent_bmi`, `deceased`).
 - `schema.split_col`: can be inferred from `path_to_image` if missing.
+- `probes.c_value` / `probes.max_iter`: logistic probe hyperparameters used for pathology classifiers.
+- `fairness.debias_mode`: choose where age-concept residualization is applied (`train_and_test` or `test_only`).
 
 CheXpert Plus PNG layout (official examples) uses relative image paths like:
 
@@ -117,6 +119,11 @@ All outputs are written to `paths.output_root`:
 - `sae.pt`: trained SAE checkpoint.
 - `study_metrics.json`: full report with model performance, fairness gaps, disentanglement metrics, and age-associated latent rankings.
 
+Classifier performance now includes:
+
+- `macro_auroc`, `macro_accuracy`, `micro_accuracy`
+- group fairness summaries including `worst_group_macro_auroc` and `worst_group_macro_accuracy`
+
 ## SAE Variants
 
 The trainer supports:
@@ -147,6 +154,7 @@ Global comparison artifacts:
 - `.../sae_sweep/plots/reconstruction_mse.png`
 - `.../sae_sweep/plots/pathology_correlations.png`
 - `.../sae_sweep/plots/recon_vs_correlation.png`
+- `.../sae_sweep/plots/worst_group_macro_auroc.png`
 
 ## Fairness Correction Strategy
 
@@ -156,6 +164,11 @@ The provided mitigation is **concept-space residualization**:
 2. Subtract each group-specific latent shift from samples in that group.
 3. Retrain/evaluate pathology probes on debiased concepts.
 4. Compare AUROC and equalized-odds gaps before/after.
+
+You can choose how the intervention is applied:
+
+- `fairness.debias_mode: "train_and_test"`: debias both SAE train/test concepts, then train/evaluate on debiased concepts.
+- `fairness.debias_mode: "test_only"`: train on original SAE concepts and debias only at test time.
 
 This is intentionally interpretable and auditable: the report also ranks age-associated latent units to support targeted review.
 

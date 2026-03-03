@@ -10,6 +10,7 @@ import torch
 from chex_sae_fairness.config import ExperimentConfig
 from chex_sae_fairness.data.chexpert_plus import audit_png_layout, build_manifest, save_manifest
 from chex_sae_fairness.data.feature_cache import load_or_create_feature_bundle
+from chex_sae_fairness.data.splits import build_split_masks
 from chex_sae_fairness.models.chexagent_features import load_feature_bundle
 from chex_sae_fairness.pipeline import run_full_study
 from chex_sae_fairness.sweep import run_sae_sweep
@@ -100,25 +101,33 @@ def train_sae_cli() -> None:
     bundle = load_feature_bundle(str(cfg.feature_path))
     x = bundle["features"].astype(np.float32)
     splits = bundle["split"].astype(str)
+    has_valid_split = bool((splits == cfg.data.validation_split_name).any())
 
-    test_mask = splits == cfg.data.test_split_name
-    valid_mask = splits == cfg.data.validation_split_name
-    train_mask = ~(test_mask | valid_mask)
-    if valid_mask.sum() == 0:
-        valid_mask = train_mask.copy()
+    split_masks = build_split_masks(
+        splits,
+        valid_name=cfg.data.validation_split_name,
+        test_name=cfg.data.test_split_name,
+        context="feature bundle",
+        require_test=False,
+    )
+    if not has_valid_split:
+        logger.warning(
+            "No '%s' split found; using train rows for SAE validation metrics.",
+            cfg.data.validation_split_name,
+        )
 
     device = cfg.features.device if cfg.features.device == "cpu" or torch.cuda.is_available() else "cpu"
     logger.info(
         "Training SAE on %d samples (valid=%d) with feature_dim=%d on device=%s",
-        int(train_mask.sum()),
-        int(valid_mask.sum()),
+        int(split_masks.train.sum()),
+        int(split_masks.valid.sum()),
         int(x.shape[1]),
         device,
     )
 
     output = train_sae_model(
-        train_features=x[train_mask],
-        valid_features=x[valid_mask],
+        train_features=x[split_masks.train],
+        valid_features=x[split_masks.valid],
         cfg=cfg.sae,
         device=device,
     )
@@ -160,6 +169,28 @@ def run_study_cli() -> None:
             counts.get("n_train"),
             counts.get("n_valid"),
             counts.get("n_test"),
+        )
+    baseline = report.get("baseline_feature_probe", {})
+    debiased = report.get("sae_concept_probe_debiased", {})
+    if isinstance(baseline, dict) and isinstance(debiased, dict):
+        baseline_perf = baseline.get("performance", {})
+        debiased_perf = debiased.get("performance", {})
+        baseline_fair = baseline.get("fairness", {})
+        debiased_fair = debiased.get("fairness", {})
+        logger.info(
+            "Baseline macro AUROC=%.4f | Debiased macro AUROC=%.4f",
+            float(baseline_perf.get("macro_auroc", float("nan"))),
+            float(debiased_perf.get("macro_auroc", float("nan"))),
+        )
+        logger.info(
+            "Baseline worst-group macro AUROC=%s | Debiased worst-group macro AUROC=%s",
+            _format_worst_group_metric(baseline_fair.get("worst_group_macro_auroc")),
+            _format_worst_group_metric(debiased_fair.get("worst_group_macro_auroc")),
+        )
+        logger.info(
+            "Baseline worst-group macro accuracy=%s | Debiased worst-group macro accuracy=%s",
+            _format_worst_group_metric(baseline_fair.get("worst_group_macro_accuracy")),
+            _format_worst_group_metric(debiased_fair.get("worst_group_macro_accuracy")),
         )
 
 
@@ -244,6 +275,15 @@ def audit_data_cli() -> None:
         logger.info("  Example unresolved metadata paths:")
         for value in report["unresolved_examples"]:
             logger.info("    - %s", value)
+
+
+def _format_worst_group_metric(metric: object) -> str:
+    if isinstance(metric, dict):
+        group = metric.get("group")
+        value = metric.get("value")
+        if group is not None and isinstance(value, (int, float, np.floating)):
+            return f"{group}:{float(value):.4f}"
+    return "n/a"
 
 
 if __name__ == "__main__":
