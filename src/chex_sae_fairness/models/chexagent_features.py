@@ -139,11 +139,19 @@ def save_feature_bundle(
     pathology_cols: list[str],
     metadata_cols: list[str],
     age_col: str,
+    patient_id_col: str,
 ) -> None:
     split = manifest[split_col].astype(str).to_numpy()
     age = manifest[age_col].astype(float).to_numpy()
     age_group = manifest["age_group"].astype(str).to_numpy()
     y_pathology = manifest[pathology_cols].astype(np.float32).to_numpy()
+    image_path = manifest["image_path"].astype(str).to_numpy() if "image_path" in manifest.columns else np.array([], dtype=object)
+    patient_id = (
+        manifest[patient_id_col].astype(str).to_numpy()
+        if patient_id_col in manifest.columns
+        else np.array([], dtype=object)
+    )
+    view_type = np.array([_infer_view_type(path) for path in image_path], dtype=object) if image_path.size else np.array([], dtype=object)
 
     # Metadata is kept in the NPZ bundle as object dtype so downstream tasks can encode as needed.
     metadata = manifest[metadata_cols].astype(str).to_numpy(dtype=object)
@@ -158,9 +166,21 @@ def save_feature_bundle(
         metadata=metadata,
         metadata_cols=np.array(metadata_cols, dtype=object),
         pathology_cols=np.array(pathology_cols, dtype=object),
+        image_path=image_path.astype(object),
+        patient_id=patient_id.astype(object),
+        view_type=view_type.astype(object),
     )
 
 
 def load_feature_bundle(path: str) -> dict[str, np.ndarray]:
     with np.load(path, allow_pickle=True) as payload:
         return {key: payload[key] for key in payload.files}
+
+
+def _infer_view_type(path: str) -> str:
+    value = str(path).lower()
+    if "lateral" in value:
+        return "lateral"
+    if "frontal" in value:
+        return "frontal"
+    return "unknown"

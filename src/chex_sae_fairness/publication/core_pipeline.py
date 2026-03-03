@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from chex_sae_fairness.config import ExperimentConfig
@@ -16,9 +17,16 @@ from chex_sae_fairness.publication.common import (
     write_experiment_config,
 )
 from chex_sae_fairness.publication.figures import generate_core_publication_figures
+from chex_sae_fairness.publication.repro import build_reproducibility_appendix
 from chex_sae_fairness.publication.spec import CoreSpec
+from chex_sae_fairness.publication.statistics import (
+    attach_multiple_testing_corrections,
+    paired_bootstrap_method_tests,
+)
 from chex_sae_fairness.publication.tables import (
     build_core_table_cohort,
+    build_core_table_group_fairness,
+    build_core_table_paired_tests,
     build_core_table_intervention_ablation,
     build_core_table_main_results,
     write_table,
@@ -51,6 +59,7 @@ def run_core_publication_pipeline(
 
     best_report_path = Path(str(comprehensive_result["best_study_report"]))
     best_report = read_json(best_report_path)
+    best_cfg = ExperimentConfig.from_yaml(Path(str(comprehensive_result["run_root"])) / "configs" / "best_sae_config.yaml")
     best_prediction_path = best_report_path.parent / "study_predictions.npz"
     prediction_bundle = (
         load_prediction_bundle(best_prediction_path)
@@ -81,6 +90,27 @@ def run_core_publication_pipeline(
             main_results,
             run_dir / "tables" / "table2_main_results",
         )
+        group_table = build_core_table_group_fairness(
+            report=best_report,
+            prediction_bundle=prediction_bundle,
+            threshold=threshold,
+            bootstrap_samples=300,
+        )
+        table_paths["table2c_group_fairness"] = write_table(
+            group_table,
+            run_dir / "tables" / "table2c_group_fairness",
+        )
+        paired = _build_paired_test_rows(
+            prediction_bundle=prediction_bundle,
+            threshold=threshold,
+            bootstrap_samples=300,
+        )
+        paired = attach_multiple_testing_corrections(paired, p_key="p_value")
+        paired_table = build_core_table_paired_tests(paired)
+        table_paths["table2b_paired_tests"] = write_table(
+            paired_table,
+            run_dir / "tables" / "table2b_paired_tests",
+        )
 
     ablations = _run_debias_ablations(
         best_config_path=Path(str(comprehensive_result["run_root"])) / "configs" / "best_sae_config.yaml",
@@ -101,6 +131,13 @@ def run_core_publication_pipeline(
         "tables": table_paths,
         "debias_ablation_results": ablations,
     }
+    repro = build_reproducibility_appendix(
+        cfg=best_cfg,
+        report=best_report,
+        extra={"pipeline": "core", "run_name": run_dir.name},
+    )
+    write_json(repro, run_dir / "reproducibility_appendix.json")
+    artifact["reproducibility_appendix"] = str((run_dir / "reproducibility_appendix.json").resolve())
     write_json(artifact, run_dir / "core_pipeline_summary.json")
     return artifact
 
@@ -164,3 +201,51 @@ def _prime_cached_features(source_cfg: ExperimentConfig, target_cfg: ExperimentC
         shutil.copy2(source_feature, target_feature)
     if source_manifest.exists() and not target_manifest.exists():
         shutil.copy2(source_manifest, target_manifest)
+
+
+def _build_paired_test_rows(
+    prediction_bundle: dict[str, Any],
+    threshold: float,
+    bootstrap_samples: int,
+) -> list[dict[str, Any]]:
+    labels = [str(v) for v in prediction_bundle["pathology_cols"].tolist()]
+    paired = paired_bootstrap_method_tests(
+        y_true=prediction_bundle["y_true"].astype(np.float32),
+        age_groups=prediction_bundle["age_groups"].astype(str),
+        label_names=labels,
+        threshold=threshold,
+        method_scores={
+            "Baseline": prediction_bundle["baseline_scores"].astype(np.float32),
+            "SAE Concepts": prediction_bundle["concept_scores"].astype(np.float32),
+            "SAE Concepts (Debiased)": prediction_bundle["debiased_scores"].astype(np.float32),
+        },
+        method_pairs=[
+            ("Baseline", "SAE Concepts"),
+            ("Baseline", "SAE Concepts (Debiased)"),
+            ("SAE Concepts", "SAE Concepts (Debiased)"),
+        ],
+        metrics=[
+            "worst_group_macro_auroc",
+            "macro_auroc_gap",
+            "macro_auroc",
+            "macro_accuracy",
+            "macro_brier",
+            "macro_ece",
+        ],
+        n_bootstrap=max(200, int(bootstrap_samples)),
+        seed=13,
+    )
+    rows: list[dict[str, Any]] = []
+    for row in paired:
+        rows.append(
+            {
+                "metric": row.metric,
+                "method_a": row.method_a,
+                "method_b": row.method_b,
+                "observed_delta": row.observed_delta,
+                "ci_low": row.ci_low,
+                "ci_high": row.ci_high,
+                "p_value": row.p_value,
+            }
+        )
+    return rows

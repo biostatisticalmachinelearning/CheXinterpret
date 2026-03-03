@@ -102,6 +102,9 @@ def generate_sweep_figures(summary: pd.DataFrame, output_dir: str | Path) -> lis
 
     heatmap_cols = [
         "reconstruction_mse",
+        "latent_death_rate",
+        "latent_mean_active_per_sample",
+        "latent_reuse_ratio",
         "mean_disentanglement",
         "mean_pathology_max_abs_corr",
         "concept_probe_macro_auroc",
@@ -112,7 +115,7 @@ def generate_sweep_figures(summary: pd.DataFrame, output_dir: str | Path) -> lis
     if available:
         metric_frame = summary.set_index("run_name")[available].copy()
         for col in metric_frame.columns:
-            if col.endswith("_mse") or col.endswith("_gap"):
+            if col.endswith("_mse") or col.endswith("_gap") or col.endswith("_death_rate"):
                 metric_frame[col] = -metric_frame[col]
         standardized = metric_frame.apply(_zscore, axis=0).fillna(0.0)
         fig, ax = plt.subplots(figsize=(max(8, 1.3 * len(available)), max(4.5, 0.48 * len(standardized))))
@@ -157,6 +160,8 @@ def generate_study_figures(report: dict[str, Any], output_dir: str | Path) -> li
                 "macro_auroc": _as_float(performance.get("macro_auroc")),
                 "macro_accuracy": _as_float(performance.get("macro_accuracy")),
                 "micro_accuracy": _as_float(performance.get("micro_accuracy")),
+                "macro_brier": _as_float(performance.get("macro_brier")),
+                "macro_ece": _as_float(performance.get("macro_ece")),
                 "worst_group_macro_auroc": _extract_worst_group_value(worst_auroc),
                 "worst_group_macro_accuracy": _extract_worst_group_value(worst_acc),
                 "macro_auroc_gap": _as_float(fairness.get("macro_auroc_gap")),
@@ -212,6 +217,64 @@ def generate_study_figures(report: dict[str, Any], output_dir: str | Path) -> li
         ax.tick_params(axis="x", rotation=25)
         ax.legend(title="Model")
         figures.append(_save(fig, out / "fairness_gap_summary.png"))
+
+    calibration_cols = ["macro_brier", "macro_ece"]
+    calibration_plot = (
+        summary.melt(id_vars=["method"], value_vars=calibration_cols, var_name="metric", value_name="value")
+        .dropna(subset=["value"])
+    )
+    if not calibration_plot.empty:
+        fig, ax = plt.subplots(figsize=(10, 6))
+        sns.barplot(
+            data=calibration_plot,
+            x="metric",
+            y="value",
+            hue="method",
+            palette="Set2",
+            ax=ax,
+        )
+        ax.set_title("Calibration Metrics (Lower Is Better)")
+        ax.set_xlabel("")
+        ax.set_ylabel("Value")
+        ax.tick_params(axis="x", rotation=20)
+        ax.legend(title="Model")
+        figures.append(_save(fig, out / "calibration_summary.png"))
+
+    if {"method", "macro_auroc", "macro_auroc_gap"}.issubset(summary.columns):
+        baseline_row = summary.loc[summary["method"] == "Baseline"]
+        if not baseline_row.empty:
+            base_auroc = float(baseline_row["macro_auroc"].iloc[0])
+            base_gap = float(baseline_row["macro_auroc_gap"].iloc[0])
+            pareto_df = summary.copy()
+            pareto_df["performance_drop"] = base_auroc - pareto_df["macro_auroc"].astype(float)
+            pareto_df["fairness_gain"] = base_gap - pareto_df["macro_auroc_gap"].astype(float)
+            pareto_df = pareto_df.dropna(subset=["performance_drop", "fairness_gain"])
+            if not pareto_df.empty:
+                fig, ax = plt.subplots(figsize=(9, 7))
+                sns.scatterplot(
+                    data=pareto_df,
+                    x="performance_drop",
+                    y="fairness_gain",
+                    hue="method",
+                    s=160,
+                    palette="Set2",
+                    ax=ax,
+                )
+                for _, row in pareto_df.iterrows():
+                    ax.text(
+                        float(row["performance_drop"]),
+                        float(row["fairness_gain"]),
+                        str(row["method"]),
+                        fontsize=9,
+                        ha="left",
+                        va="bottom",
+                    )
+                ax.axvline(0.0, color="#777777", linestyle="--", linewidth=1)
+                ax.axhline(0.0, color="#777777", linestyle="--", linewidth=1)
+                ax.set_title("Fairness-Performance Pareto (vs Baseline)")
+                ax.set_xlabel("Macro AUROC drop (baseline - method)")
+                ax.set_ylabel("Macro AUROC-gap improvement")
+                figures.append(_save(fig, out / "pareto_fairness_vs_performance.png"))
 
     group_rows: list[dict[str, Any]] = []
     for key, label in method_order:

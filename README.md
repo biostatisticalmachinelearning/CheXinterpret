@@ -54,7 +54,7 @@ Update `configs/default.yaml` with your local paths and schema:
 - `schema.metadata_cols`: metadata columns from the CSV (CheXpert Plus commonly uses `age`, `sex`, `race`, `ethnicity`, `interpreter_needed`, `insurance_type`, `recent_bmi`, `deceased`).
 - `schema.split_col`: can be inferred from `path_to_image` if missing.
 - `probes.c_value` / `probes.max_iter`: logistic probe hyperparameters used for pathology classifiers.
-- `fairness.debias_mode`: choose where age-concept residualization is applied (`train_and_test` or `test_only`).
+- `fairness.debias_mode`: choose where age-concept residualization is applied (`train_and_test`, `test_only`, or `train_only`).
 
 CheXpert Plus PNG layout (official examples) uses relative image paths like:
 
@@ -131,11 +131,12 @@ Each pipeline writes:
 - `tables/*.csv` and `tables/*.md`
 - `figures/*.png`
 - `<pipeline>_pipeline_summary.json`
+- `reproducibility_appendix.json`
 
 Publication-ready figures are saved under:
 
 - `figures/sweep/`: hyperparameter ranking, disentanglement-vs-correlation, fairness-performance tradeoff, metric scorecard
-- `figures/best_model/`: baseline vs SAE vs debiased performance/fairness, per-group results, top age-associated latents, SAE training curve
+- `figures/best_model/`: baseline vs SAE vs debiased performance/fairness, calibration, fairness-performance Pareto, per-group results, top age-associated latents, SAE training curve
 
 Run a single SAE only (legacy behavior):
 
@@ -183,8 +184,10 @@ All outputs are written to `paths.output_root`:
 
 Classifier performance now includes:
 
-- `macro_auroc`, `macro_accuracy`, `micro_accuracy`
+- `macro_auroc`, `macro_accuracy`, `micro_accuracy`, `macro_brier`, `macro_ece`
 - group fairness summaries including `worst_group_macro_auroc` and `worst_group_macro_accuracy`
+- paired bootstrap method-comparison tests with multiple-testing corrected p-values (core pipeline)
+- concept-level permutation controls with BH/Holm corrections (supplement pipeline)
 
 ## SAE Variants
 
@@ -231,6 +234,7 @@ You can choose how the intervention is applied:
 
 - `fairness.debias_mode: "train_and_test"`: debias both SAE train/test concepts, then train/evaluate on debiased concepts.
 - `fairness.debias_mode: "test_only"`: train on original SAE concepts and debias only at test time.
+- `fairness.debias_mode: "train_only"`: debias SAE train concepts only, keeping test concepts untouched.
 
 This is intentionally interpretable and auditable: the report also ranks age-associated latent units to support targeted review.
 

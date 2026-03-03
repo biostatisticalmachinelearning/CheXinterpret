@@ -30,3 +30,36 @@ def test_run_baseline_suite_raw_only() -> None:
     result = run_baseline_suite(inputs, methods=["raw"])
     assert "raw" in result
     assert "performance" in result["raw"]
+
+
+def test_run_baseline_suite_extended_methods() -> None:
+    rng = np.random.default_rng(17)
+    x_train = rng.normal(size=(60, 10)).astype(np.float32)
+    x_test = rng.normal(size=(20, 10)).astype(np.float32)
+    y_train = (rng.uniform(size=(60, 2)) > 0.45).astype(np.int64)
+    y_test = (rng.uniform(size=(20, 2)) > 0.45).astype(np.int64)
+    groups_train = np.array(["young"] * 30 + ["old"] * 30)
+    groups_test = np.array(["young"] * 10 + ["old"] * 10)
+
+    inputs = BaselineSuiteInputs(
+        x_train=x_train,
+        x_test=x_test,
+        y_train=y_train,
+        y_test=y_test,
+        age_groups_train=groups_train,
+        age_groups_test=groups_test,
+        pathology_cols=["a", "b"],
+        threshold=0.5,
+        bootstrap_samples=0,
+        probe_c_value=1.0,
+        probe_max_iter=200,
+        latent_dim=4,
+    )
+
+    result = run_baseline_suite(
+        inputs,
+        methods=["supervised_bottleneck", "equalized_odds", "adversarial_debiasing"],
+    )
+    assert "supervised_bottleneck" in result
+    assert "equalized_odds" in result
+    assert "adversarial_debiasing" in result

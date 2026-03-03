@@ -75,6 +75,7 @@ def apply_age_residualization(
     canonical_mode = _canonicalize_debias_mode(mode)
     # `train_and_test` debiases both train/test representations.
     # `test_only` preserves training features and applies intervention only at inference.
+    # `train_only` debiases training features only (useful as a robustness ablation).
     if canonical_mode == "train_and_test":
         return (
             residualizer.transform(z_train, age_groups_train),
@@ -82,6 +83,8 @@ def apply_age_residualization(
         )
     if canonical_mode == "test_only":
         return z_train, residualizer.transform(z_test, age_groups_test)
+    if canonical_mode == "train_only":
+        return residualizer.transform(z_train, age_groups_train), z_test
     raise ValueError(f"Unsupported debias mode: {mode}")
 
 
@@ -93,9 +96,11 @@ def _canonicalize_debias_mode(mode: str) -> str:
         "both": "train_and_test",
         "test_only": "test_only",
         "test": "test_only",
+        "train_only": "train_only",
+        "train": "train_only",
     }
     if value not in aliases:
         raise ValueError(
-            f"Unknown debias mode '{mode}'. Use one of: train_and_test, test_only."
+            f"Unknown debias mode '{mode}'. Use one of: train_and_test, test_only, train_only."
         )
     return aliases[value]

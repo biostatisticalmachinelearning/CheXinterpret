@@ -1,7 +1,8 @@
 output_dir: "outputs/default/sae_sweep"
 
 runs:
-  - name: "l1_latent1024_l1e4"
+  - name: "l1_latent1024_l1e4_seed13"
+    seed: 13
     sae:
       variant: "l1"
       latent_dim: 1024
@@ -9,7 +10,8 @@ runs:
       epochs: 30
       batch_size: 512
 
-  - name: "l1_latent2048_l1e4"
+  - name: "l1_latent2048_l1e4_seed13"
+    seed: 13
     sae:
       variant: "l1"
       latent_dim: 2048
@@ -17,7 +19,44 @@ runs:
       epochs: 40
       batch_size: 512
 
-  - name: "topk_latent2048_k64"
+  - name: "l1_latent4096_l1e4_seed13"
+    seed: 13
+    sae:
+      variant: "l1"
+      latent_dim: 4096
+      l1_lambda: 1.0e-4
+      epochs: 40
+      batch_size: 512
+
+  - name: "l1_latent2048_l5e5_seed13"
+    seed: 13
+    sae:
+      variant: "l1"
+      latent_dim: 2048
+      l1_lambda: 5.0e-5
+      epochs: 40
+      batch_size: 512
+
+  - name: "l1_latent2048_l2e4_seed13"
+    seed: 13
+    sae:
+      variant: "l1"
+      latent_dim: 2048
+      l1_lambda: 2.0e-4
+      epochs: 40
+      batch_size: 512
+
+  - name: "topk_latent2048_k32_seed13"
+    seed: 13
+    sae:
+      variant: "topk"
+      latent_dim: 2048
+      topk_k: 32
+      epochs: 40
+      batch_size: 512
+
+  - name: "topk_latent2048_k64_seed13"
+    seed: 13
     sae:
       variant: "topk"
       latent_dim: 2048
@@ -25,7 +64,44 @@ runs:
       epochs: 40
       batch_size: 512
 
-  - name: "topk_latent4096_k64"
+  - name: "topk_latent4096_k64_seed13"
+    seed: 13
+    sae:
+      variant: "topk"
+      latent_dim: 4096
+      topk_k: 64
+      epochs: 40
+      batch_size: 512
+
+  - name: "topk_latent4096_k128_seed13"
+    seed: 13
+    sae:
+      variant: "topk"
+      latent_dim: 4096
+      topk_k: 128
+      epochs: 40
+      batch_size: 512
+
+  - name: "l1_latent2048_l1e4_seed17"
+    seed: 17
+    sae:
+      variant: "l1"
+      latent_dim: 2048
+      l1_lambda: 1.0e-4
+      epochs: 40
+      batch_size: 512
+
+  - name: "topk_latent2048_k64_seed17"
+    seed: 17
+    sae:
+      variant: "topk"
+      latent_dim: 2048
+      topk_k: 64
+      epochs: 40
+      batch_size: 512
+
+  - name: "topk_latent4096_k64_seed17"
+    seed: 17
     sae:
       variant: "topk"
       latent_dim: 4096

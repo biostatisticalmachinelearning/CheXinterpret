@@ -71,6 +71,7 @@ def run_full_study(config_path: str) -> dict[str, object]:
 
     x_train, x_valid, x_test = x[split_masks.train], x[split_masks.valid], x[split_masks.test]
     y_train, y_test = pathologies[split_masks.train], pathologies[split_masks.test]
+    test_indices = np.where(split_masks.test)[0].astype(np.int64)
 
     metadata_train = metadata_df.loc[split_masks.train].reset_index(drop=True)
     metadata_test = metadata_df.loc[split_masks.test].reset_index(drop=True)
@@ -206,6 +207,7 @@ def run_full_study(config_path: str) -> dict[str, object]:
         metadata=metadata_test,
         metadata_cols=metadata_cols,
     )
+    latent_activity = _summarize_latent_activity(z_train, latent_correlations)
 
     recon = reconstruction_metrics(x_test, x_hat_test)
     age_assoc = rank_age_associated_concepts(z_train, age_groups_train, top_k=25)
@@ -232,6 +234,7 @@ def run_full_study(config_path: str) -> dict[str, object]:
             "train_curve": sae_output.train_curve,
             "valid_curve": sae_output.valid_curve,
             "reconstruction": recon,
+            "latent_activity": latent_activity,
         },
         "baseline_feature_probe": {
             "performance": baseline_perf,
@@ -258,6 +261,22 @@ def run_full_study(config_path: str) -> dict[str, object]:
         baseline_scores=baseline_scores.astype(np.float32),
         concept_scores=concept_scores.astype(np.float32),
         debiased_scores=debiased_scores.astype(np.float32),
+        test_indices=test_indices,
+        test_view_type=(
+            bundle["view_type"][split_masks.test].astype(str)
+            if "view_type" in bundle
+            else np.array([], dtype=object)
+        ),
+        test_patient_id=(
+            bundle["patient_id"][split_masks.test].astype(str)
+            if "patient_id" in bundle
+            else np.array([], dtype=object)
+        ),
+        test_image_path=(
+            bundle["image_path"][split_masks.test].astype(str)
+            if "image_path" in bundle
+            else np.array([], dtype=object)
+        ),
     )
 
     write_json(report, cfg.study_metrics_path)
@@ -301,6 +320,46 @@ def _fit_and_evaluate_probe(
         bootstrap_samples=cfg.fairness.bootstrap_samples,
     )
     return scores.astype(np.float32), performance, fairness
+
+
+def _summarize_latent_activity(z_train: np.ndarray, correlations: dict[str, object]) -> dict[str, float]:
+    if z_train.size == 0:
+        return {
+            "death_rate": float("nan"),
+            "mean_active_per_sample": float("nan"),
+            "reuse_ratio": float("nan"),
+            "max_concepts_per_feature": float("nan"),
+        }
+
+    active_mask = z_train > 1e-6
+    activity_rate = active_mask.mean(axis=0)
+    death_rate = float(np.mean(activity_rate <= 1e-4))
+    mean_active_per_sample = float(np.mean(active_mask.sum(axis=1)))
+
+    concept_rows = correlations.get("concepts", []) if isinstance(correlations, dict) else []
+    latent_counts: dict[int, int] = {}
+    if isinstance(concept_rows, list):
+        for row in concept_rows:
+            if not isinstance(row, dict):
+                continue
+            idx = row.get("latent_index")
+            if isinstance(idx, (int, np.integer)) and int(idx) >= 0:
+                latent_counts[int(idx)] = latent_counts.get(int(idx), 0) + 1
+
+    if latent_counts:
+        reused = [count for count in latent_counts.values() if count > 1]
+        reuse_ratio = float(len(reused) / len(latent_counts))
+        max_concepts_per_feature = float(max(latent_counts.values()))
+    else:
+        reuse_ratio = float("nan")
+        max_concepts_per_feature = float("nan")
+
+    return {
+        "death_rate": death_rate,
+        "mean_active_per_sample": mean_active_per_sample,
+        "reuse_ratio": reuse_ratio,
+        "max_concepts_per_feature": max_concepts_per_feature,
+    }
 
 
 def _resolve_device(requested: str) -> str:

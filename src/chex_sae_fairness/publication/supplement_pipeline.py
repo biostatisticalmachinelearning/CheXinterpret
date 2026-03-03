@@ -30,6 +30,13 @@ from chex_sae_fairness.publication.tables import (
     build_supplement_table_seed_stability,
     write_table,
 )
+from chex_sae_fairness.publication.repro import build_reproducibility_appendix
+from chex_sae_fairness.publication.validity import (
+    build_concept_permutation_table,
+    build_concept_precision_recall_table,
+    build_patient_split_leakage_table,
+    build_view_sensitivity_table,
+)
 from chex_sae_fairness.study_runner import run_comprehensive_study
 from chex_sae_fairness.training.train_sae import encode_features
 from chex_sae_fairness.utils.io import read_json, write_json
@@ -64,6 +71,7 @@ def run_supplement_publication_pipeline(
     prediction_bundle = load_prediction_bundle(best_report_path.parent / "study_predictions.npz")
 
     seed_stability = _run_seed_stability(best_cfg, spec, run_dir / "seed_stability")
+    seed_variance = _summarize_seed_variance(seed_stability)
     uncertain_policy = _run_uncertain_policy_ablation(best_cfg, spec, run_dir / "uncertain_policy")
     debias_ablation = _run_debias_ablation(best_cfg, spec, run_dir / "debias_ablation")
     age_bin_sensitivity = _run_age_bin_sensitivity(best_cfg, spec, run_dir / "age_bins")
@@ -75,6 +83,14 @@ def run_supplement_publication_pipeline(
         prediction_bundle=prediction_bundle,
         missing_fractions=spec.missing_metadata_fractions,
         output_dir=run_dir / "missingness_sensitivity",
+    )
+    concept_precision_recall = _run_concept_precision_recall(best_cfg, run_dir / "concept_precision_recall")
+    concept_permutation = _run_concept_permutation_controls(best_cfg, spec, run_dir / "concept_permutation")
+    leakage_checks = _run_leakage_checks(best_cfg, run_dir / "leakage_checks")
+    view_sensitivity = _run_view_sensitivity(
+        prediction_bundle=prediction_bundle,
+        threshold=float(best_report.get("debiasing", {}).get("fairness_threshold", 0.5)),
+        output_dir=run_dir / "view_sensitivity",
     )
     permutation_control = _run_permutation_controls(best_cfg, spec, run_dir / "permutation_control")
 
@@ -91,6 +107,9 @@ def run_supplement_publication_pipeline(
         threshold_sensitivity=threshold_sensitivity,
         missingness_sensitivity=missingness_sensitivity,
         permutation_control=permutation_control,
+        concept_precision_recall=concept_precision_recall,
+        view_sensitivity=view_sensitivity,
+        concept_permutation=concept_permutation,
     )
 
     table_paths: dict[str, dict[str, str]] = {}
@@ -98,6 +117,11 @@ def run_supplement_publication_pipeline(
         build_supplement_table_seed_stability(seed_stability.to_dict(orient="records")),
         run_dir / "tables" / "stable_seeds",
     )
+    if not seed_variance.empty:
+        table_paths["seed_variance"] = write_table(
+            seed_variance,
+            run_dir / "tables" / "seed_variance",
+        )
     table_paths["uncertain_policy"] = write_table(
         build_supplement_table_ablations(uncertain_policy.to_dict(orient="records"), ["uncertain_policy", "method"]),
         run_dir / "tables" / "uncertain_policy",
@@ -127,6 +151,26 @@ def run_supplement_publication_pipeline(
             permutation_control,
             run_dir / "tables" / "permutation_control",
         )
+    if not concept_precision_recall.empty:
+        table_paths["concept_precision_recall"] = write_table(
+            concept_precision_recall,
+            run_dir / "tables" / "concept_precision_recall",
+        )
+    if not concept_permutation.empty:
+        table_paths["concept_permutation"] = write_table(
+            concept_permutation,
+            run_dir / "tables" / "concept_permutation",
+        )
+    if not leakage_checks.empty:
+        table_paths["leakage_checks"] = write_table(
+            leakage_checks,
+            run_dir / "tables" / "leakage_checks",
+        )
+    if not view_sensitivity.empty:
+        table_paths["view_sensitivity"] = write_table(
+            view_sensitivity,
+            run_dir / "tables" / "view_sensitivity",
+        )
     if not external_validation.empty:
         table_paths["external_validation"] = write_table(
             external_validation,
@@ -146,6 +190,18 @@ def run_supplement_publication_pipeline(
         "external_validation_enabled": bool(spec.external_config_paths),
         "human_eval_enabled": spec.human_eval_csv is not None,
     }
+    repro = build_reproducibility_appendix(
+        cfg=best_cfg,
+        report=best_report,
+        extra={
+            "pipeline": "supplement",
+            "run_name": run_dir.name,
+            "n_external_configs": len(spec.external_config_paths),
+            "n_seed_runs": len(spec.seeds),
+        },
+    )
+    write_json(repro, run_dir / "reproducibility_appendix.json")
+    artifact["reproducibility_appendix"] = str((run_dir / "reproducibility_appendix.json").resolve())
     write_json(artifact, run_dir / "supplement_pipeline_summary.json")
     return artifact
 
@@ -158,6 +214,7 @@ def _run_seed_stability(cfg: ExperimentConfig, spec: SupplementSpec, output_dir:
         _prime_cached_features(cfg, run_cfg)
         run_cfg_path = write_experiment_config(run_cfg, run_out / "config.yaml")
         report = run_full_study(str(run_cfg_path))
+        latent_activity = report.get("sae", {}).get("latent_activity", {})
         for method_key, method_label in [
             ("baseline_feature_probe", "Baseline"),
             ("sae_concept_probe", "SAE"),
@@ -173,9 +230,38 @@ def _run_seed_stability(cfg: ExperimentConfig, spec: SupplementSpec, output_dir:
                     "macro_accuracy": perf.get("macro_accuracy"),
                     "macro_auroc_gap": fair.get("macro_auroc_gap"),
                     "worst_group_macro_auroc": _worst_group_value(fair.get("worst_group_macro_auroc")),
+                    "latent_death_rate": latent_activity.get("death_rate"),
+                    "latent_reuse_ratio": latent_activity.get("reuse_ratio"),
+                    "latent_mean_active_per_sample": latent_activity.get("mean_active_per_sample"),
                 }
             )
     return pd.DataFrame(rows)
+
+
+def _summarize_seed_variance(seed_stability: pd.DataFrame) -> pd.DataFrame:
+    if seed_stability.empty:
+        return seed_stability
+    metrics = [
+        col
+        for col in [
+            "macro_auroc",
+            "macro_accuracy",
+            "macro_auroc_gap",
+            "worst_group_macro_auroc",
+            "latent_death_rate",
+            "latent_reuse_ratio",
+            "latent_mean_active_per_sample",
+        ]
+        if col in seed_stability.columns
+    ]
+    if not metrics:
+        return pd.DataFrame()
+    agg = seed_stability.groupby("method", dropna=False)[metrics].agg(["mean", "std"]).reset_index()
+    agg.columns = [
+        "method" if col[0] == "method" else f"{col[0]}_{col[1]}"
+        for col in agg.columns.to_flat_index()
+    ]
+    return agg
 
 
 def _run_uncertain_policy_ablation(cfg: ExperimentConfig, spec: SupplementSpec, output_dir: Path) -> pd.DataFrame:
@@ -369,10 +455,11 @@ def _run_missingness_sensitivity(
     all_indices = np.arange(n)
     for frac in missing_fractions:
         frac = float(frac)
+        missing_n = max(1, int(round(frac * n))) if frac > 0 else 0
         keep = max(1, int(round((1.0 - frac) * n)))
         sampled = np.sort(rng.choice(all_indices, size=keep, replace=False))
         for method, scores in method_scores.items():
-            out = evaluate_prediction_bundle(
+            out_image = evaluate_prediction_bundle(
                 y_true=y_true[sampled],
                 y_score=scores[sampled],
                 age_groups=age_groups[sampled],
@@ -383,10 +470,33 @@ def _run_missingness_sensitivity(
             rows.append(
                 {
                     "missing_fraction": frac,
+                    "missing_type": "image",
                     "method": method,
-                    "macro_auroc": out["performance"]["macro_auroc"],
-                    "macro_accuracy": out["performance"]["macro_accuracy"],
-                    "macro_auroc_gap": out["fairness"]["macro_auroc_gap"],
+                    "macro_auroc": out_image["performance"]["macro_auroc"],
+                    "macro_accuracy": out_image["performance"]["macro_accuracy"],
+                    "macro_auroc_gap": out_image["fairness"]["macro_auroc_gap"],
+                }
+            )
+            metadata_groups = age_groups.copy()
+            if missing_n > 0:
+                missing_idx = rng.choice(all_indices, size=missing_n, replace=False)
+                metadata_groups[missing_idx] = "missing_age_group"
+            out_meta = evaluate_prediction_bundle(
+                y_true=y_true,
+                y_score=scores,
+                age_groups=metadata_groups,
+                label_names=labels,
+                threshold=threshold,
+                bootstrap_samples=0,
+            )
+            rows.append(
+                {
+                    "missing_fraction": frac,
+                    "missing_type": "metadata",
+                    "method": method,
+                    "macro_auroc": out_meta["performance"]["macro_auroc"],
+                    "macro_accuracy": out_meta["performance"]["macro_accuracy"],
+                    "macro_auroc_gap": out_meta["fairness"]["macro_auroc_gap"],
                 }
             )
     frame = pd.DataFrame(rows)
@@ -394,9 +504,71 @@ def _run_missingness_sensitivity(
     return frame
 
 
+def _run_concept_precision_recall(cfg: ExperimentConfig, output_dir: Path) -> pd.DataFrame:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    analysis = _load_latent_analysis_bundle(cfg)
+    frame = build_concept_precision_recall_table(
+        z_train=analysis["z_train"],
+        z_test=analysis["z_test"],
+        y_path_train=analysis["y_train"],
+        y_path_test=analysis["y_test"],
+        pathology_cols=analysis["path_cols"],
+        metadata_train=analysis["metadata_train"],
+        metadata_test=analysis["metadata_test"],
+        metadata_cols=analysis["meta_cols"],
+        seed=int(cfg.seed),
+    )
+    write_table(frame, output_dir / "concept_precision_recall")
+    return frame
+
+
+def _run_concept_permutation_controls(cfg: ExperimentConfig, spec: SupplementSpec, output_dir: Path) -> pd.DataFrame:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    analysis = _load_latent_analysis_bundle(cfg)
+    frame = build_concept_permutation_table(
+        z=analysis["z_test"],
+        y_pathology=analysis["y_test"],
+        pathology_cols=analysis["path_cols"],
+        metadata=analysis["metadata_test"],
+        metadata_cols=analysis["meta_cols"],
+        repeats=max(5, int(spec.permutation_repeats)),
+        seed=int(cfg.seed),
+    )
+    if not frame.empty:
+        write_table(frame, output_dir / "concept_permutation")
+    return frame
+
+
+def _run_leakage_checks(cfg: ExperimentConfig, output_dir: Path) -> pd.DataFrame:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    bundle = load_feature_bundle(str(cfg.feature_path))
+    split = bundle["split"].astype(str)
+    patient_id = bundle["patient_id"].astype(str) if "patient_id" in bundle else None
+    frame = build_patient_split_leakage_table(split=split, patient_id=patient_id)
+    write_table(frame, output_dir / "patient_split_leakage")
+    return frame
+
+
+def _run_view_sensitivity(
+    prediction_bundle: dict[str, np.ndarray],
+    threshold: float,
+    output_dir: Path,
+) -> pd.DataFrame:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    frame = build_view_sensitivity_table(prediction_bundle=prediction_bundle, threshold=threshold)
+    if not frame.empty:
+        write_table(frame, output_dir / "view_sensitivity")
+    return frame
+
+
 def _run_permutation_controls(cfg: ExperimentConfig, spec: SupplementSpec, output_dir: Path) -> pd.DataFrame:
     output_dir.mkdir(parents=True, exist_ok=True)
-    z_test, y_test, metadata_test, path_cols, meta_cols = _load_test_latents_and_targets(cfg)
+    analysis = _load_latent_analysis_bundle(cfg)
+    z_test = analysis["z_test"]
+    y_test = analysis["y_test"]
+    metadata_test = analysis["metadata_test"]
+    path_cols = analysis["path_cols"]
+    meta_cols = analysis["meta_cols"]
     observed = summarize_latent_correlations(
         z=z_test,
         y_pathology=y_test,
@@ -483,9 +655,7 @@ def _run_human_eval_summary(human_eval_csv: str | None) -> pd.DataFrame:
     )
 
 
-def _load_test_latents_and_targets(
-    cfg: ExperimentConfig,
-) -> tuple[np.ndarray, np.ndarray, pd.DataFrame, list[str], list[str]]:
+def _load_latent_analysis_bundle(cfg: ExperimentConfig) -> dict[str, Any]:
     bundle = load_feature_bundle(str(cfg.feature_path))
     x = bundle["features"].astype(np.float32)
     y = bundle["y_pathology"].astype(np.float32)
@@ -508,14 +678,18 @@ def _load_test_latents_and_targets(
         topk_k=int(ckpt.get("topk_k", cfg.sae.topk_k)),
     )
     model.load_state_dict(ckpt["state_dict"])
+    z_train = encode_features(model=model, features=x[masks.train], batch_size=512, device="cpu")
     z_test = encode_features(model=model, features=x[masks.test], batch_size=512, device="cpu")
-    return (
-        z_test.astype(np.float32),
-        y[masks.test].astype(np.float32),
-        metadata.loc[masks.test].reset_index(drop=True),
-        path_cols,
-        meta_cols,
-    )
+    return {
+        "z_train": z_train.astype(np.float32),
+        "z_test": z_test.astype(np.float32),
+        "y_train": y[masks.train].astype(np.float32),
+        "y_test": y[masks.test].astype(np.float32),
+        "metadata_train": metadata.loc[masks.train].reset_index(drop=True),
+        "metadata_test": metadata.loc[masks.test].reset_index(drop=True),
+        "path_cols": path_cols,
+        "meta_cols": meta_cols,
+    }
 
 
 def _worst_group_value(entry: Any) -> float:

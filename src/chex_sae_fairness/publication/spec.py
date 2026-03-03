@@ -12,7 +12,7 @@ class CoreSpec:
     sweep_config_path: str = "configs/sae_sweep.yaml"
     run_name: str | None = None
     force_recompute_features: bool = False
-    debias_ablation_modes: list[str] = field(default_factory=lambda: ["train_and_test", "test_only"])
+    debias_ablation_modes: list[str] = field(default_factory=lambda: ["train_and_test", "test_only", "train_only"])
     debias_ablation_strengths: list[float] = field(default_factory=lambda: [0.25, 0.5, 1.0, 1.5])
 
 
@@ -21,7 +21,7 @@ class SupplementSpec:
     run_name: str | None = None
     seeds: list[int] = field(default_factory=lambda: [13, 17, 23])
     uncertain_policies: list[str] = field(default_factory=lambda: ["zero", "one", "ignore"])
-    debias_modes: list[str] = field(default_factory=lambda: ["train_and_test", "test_only"])
+    debias_modes: list[str] = field(default_factory=lambda: ["train_and_test", "test_only", "train_only"])
     debias_strengths: list[float] = field(default_factory=lambda: [0.25, 0.5, 1.0, 1.5])
     age_bin_sets: list[list[int]] = field(
         default_factory=lambda: [[18, 35, 50, 65, 80, 120], [18, 40, 60, 80, 120], [18, 45, 60, 75, 120]]
@@ -29,7 +29,16 @@ class SupplementSpec:
     permutation_repeats: int = 5
     missing_metadata_fractions: list[float] = field(default_factory=lambda: [0.0, 0.1, 0.2])
     baseline_methods: list[str] = field(
-        default_factory=lambda: ["raw", "pca", "nmf", "group_reweighted", "group_threshold"]
+        default_factory=lambda: [
+            "raw",
+            "pca",
+            "nmf",
+            "supervised_bottleneck",
+            "group_reweighted",
+            "group_threshold",
+            "equalized_odds",
+            "adversarial_debiasing",
+        ]
     )
     fairness_thresholds: list[float] = field(default_factory=lambda: [0.3, 0.5, 0.7])
     external_config_paths: list[str] = field(default_factory=list)

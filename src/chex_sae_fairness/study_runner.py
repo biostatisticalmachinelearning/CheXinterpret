@@ -45,6 +45,7 @@ def run_comprehensive_study(
     sweep_payload = _load_or_default_sweep_payload(
         sweep_config_path=sweep_config_path,
         base_sae_cfg=workspace_cfg.sae,
+        base_seed=workspace_cfg.seed,
     )
     sweep_payload["output_dir"] = str((run_root / "sae_sweep").resolve())
     resolved_sweep_path = _write_yaml(
@@ -128,6 +129,7 @@ def create_timestamped_run_dir(base_output_root: str | Path, run_name: str | Non
 def _load_or_default_sweep_payload(
     sweep_config_path: str | None,
     base_sae_cfg: SAEConfig,
+    base_seed: int,
 ) -> dict[str, Any]:
     if sweep_config_path:
         path = Path(sweep_config_path).expanduser()
@@ -141,50 +143,48 @@ def _load_or_default_sweep_payload(
 
     half_latent = max(128, int(base_sae_cfg.latent_dim // 2))
     double_latent = int(base_sae_cfg.latent_dim * 2)
-    return {
-        "runs": [
-            {
-                "name": f"l1_latent{half_latent}",
-                "sae": {
-                    "variant": "l1",
-                    "latent_dim": half_latent,
-                    "l1_lambda": base_sae_cfg.l1_lambda,
-                    "epochs": base_sae_cfg.epochs,
-                    "batch_size": base_sae_cfg.batch_size,
-                },
-            },
-            {
-                "name": f"l1_latent{base_sae_cfg.latent_dim}",
-                "sae": {
-                    "variant": "l1",
-                    "latent_dim": base_sae_cfg.latent_dim,
-                    "l1_lambda": base_sae_cfg.l1_lambda,
-                    "epochs": base_sae_cfg.epochs,
-                    "batch_size": base_sae_cfg.batch_size,
-                },
-            },
-            {
-                "name": f"topk_latent{base_sae_cfg.latent_dim}_k{base_sae_cfg.topk_k}",
-                "sae": {
-                    "variant": "topk",
-                    "latent_dim": base_sae_cfg.latent_dim,
-                    "topk_k": base_sae_cfg.topk_k,
-                    "epochs": base_sae_cfg.epochs,
-                    "batch_size": base_sae_cfg.batch_size,
-                },
-            },
-            {
-                "name": f"topk_latent{double_latent}_k{base_sae_cfg.topk_k}",
-                "sae": {
-                    "variant": "topk",
-                    "latent_dim": double_latent,
-                    "topk_k": base_sae_cfg.topk_k,
-                    "epochs": base_sae_cfg.epochs,
-                    "batch_size": base_sae_cfg.batch_size,
-                },
-            },
-        ]
-    }
+    latent_sizes = [half_latent, int(base_sae_cfg.latent_dim), double_latent]
+    l1_values = sorted({float(base_sae_cfg.l1_lambda), float(base_sae_cfg.l1_lambda * 2.0)})
+    topk_values = sorted({max(16, int(base_sae_cfg.topk_k // 2)), int(base_sae_cfg.topk_k)})
+    seeds = [int(base_seed), int(base_seed + 4)]
+
+    runs: list[dict[str, Any]] = []
+    for latent in latent_sizes:
+        for l1_value in l1_values:
+            for seed in seeds:
+                runs.append(
+                    {
+                        "name": f"l1_latent{latent}_l1{_float_token(l1_value)}_seed{seed}",
+                        "seed": seed,
+                        "sae": {
+                            "variant": "l1",
+                            "latent_dim": latent,
+                            "l1_lambda": float(l1_value),
+                            "epochs": base_sae_cfg.epochs,
+                            "batch_size": base_sae_cfg.batch_size,
+                        },
+                    }
+                )
+
+    for latent in [int(base_sae_cfg.latent_dim), double_latent]:
+        for topk in topk_values:
+            if topk >= latent:
+                continue
+            for seed in seeds:
+                runs.append(
+                    {
+                        "name": f"topk_latent{latent}_k{topk}_seed{seed}",
+                        "seed": seed,
+                        "sae": {
+                            "variant": "topk",
+                            "latent_dim": latent,
+                            "topk_k": int(topk),
+                            "epochs": base_sae_cfg.epochs,
+                            "batch_size": base_sae_cfg.batch_size,
+                        },
+                    }
+                )
+    return {"runs": runs}
 
 
 def _select_best_run(summary: pd.DataFrame) -> str:
@@ -192,7 +192,12 @@ def _select_best_run(summary: pd.DataFrame) -> str:
         raise ValueError("SAE sweep summary is empty; cannot select best run.")
 
     scored = summary.copy()
-    for column in ["reconstruction_mse", "concept_probe_macro_auroc_gap", "concept_probe_macro_accuracy_gap"]:
+    for column in [
+        "reconstruction_mse",
+        "latent_death_rate",
+        "concept_probe_macro_auroc_gap",
+        "concept_probe_macro_accuracy_gap",
+    ]:
         if column in scored.columns:
             scored[column] = -scored[column].astype(float)
 
@@ -203,7 +208,10 @@ def _select_best_run(summary: pd.DataFrame) -> str:
             "mean_pathology_max_abs_corr",
             "concept_probe_macro_auroc",
             "concept_probe_worst_group_macro_auroc",
+            "latent_reuse_ratio",
+            "latent_mean_active_per_sample",
             "reconstruction_mse",
+            "latent_death_rate",
             "concept_probe_macro_auroc_gap",
         ]
         if col in scored.columns
@@ -290,3 +298,8 @@ def _copy_if_newer(source: Path, target: Path) -> int:
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, target)
     return 1
+
+
+def _float_token(value: float) -> str:
+    text = f"{float(value):.2e}"
+    return text.replace(".", "p").replace("+", "").replace("-", "m")

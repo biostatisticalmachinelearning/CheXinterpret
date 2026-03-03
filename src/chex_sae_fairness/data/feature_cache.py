@@ -71,6 +71,7 @@ def load_or_create_feature_bundle(
         pathology_cols=cfg.schema.pathology_cols,
         metadata_cols=cfg.schema.metadata_cols,
         age_col=cfg.schema.age_col,
+        patient_id_col=cfg.schema.patient_id_col,
     )
     logger.info("Saved feature bundle to %s", cfg.feature_path)
 

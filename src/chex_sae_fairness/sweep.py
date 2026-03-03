@@ -86,6 +86,8 @@ def run_sae_sweep(
 
     for run in runs:
         run_name = str(run["name"])
+        run_seed = int(run.get("seed", base_cfg.seed))
+        seed_everything(run_seed)
         logger.info("Starting sweep run: %s", run_name)
         sae_overrides = run.get("sae", {})
         sae_cfg = _build_sae_config(base_cfg.sae, sae_overrides)
@@ -150,6 +152,7 @@ def run_sae_sweep(
             metadata=metadata_test,
             metadata_cols=metadata_cols,
         )
+        latent_activity = _summarize_latent_activity(z_train, correlations)
         concept_probe = fit_multilabel_probe(
             z_train,
             y_train,
@@ -175,9 +178,11 @@ def run_sae_sweep(
         run_report = {
             "run_name": run_name,
             "sae": asdict(sae_cfg),
+            "seed": run_seed,
             "train_curve": trained.train_curve,
             "valid_curve": trained.valid_curve,
             "reconstruction": recon,
+            "latent_activity": latent_activity,
             "disentanglement": disentanglement,
             "latent_correlations": correlations,
             "concept_probe": {
@@ -203,6 +208,7 @@ def run_sae_sweep(
                 "base_config": str(Path(base_config_path).resolve()),
                 "sweep_config": str(Path(sweep_config_path).resolve()),
                 "sae": asdict(sae_cfg),
+                "seed": run_seed,
             },
             run_dir / "run_config.yaml",
         )
@@ -211,12 +217,17 @@ def run_sae_sweep(
             {
                 "run_name": run_name,
                 "variant": sae_cfg.variant,
+                "seed": run_seed,
                 "latent_dim": sae_cfg.latent_dim,
                 "topk_k": sae_cfg.topk_k,
                 "l1_lambda": sae_cfg.l1_lambda,
                 "epochs": sae_cfg.epochs,
                 "reconstruction_mse": recon["mse"],
                 "reconstruction_explained_variance": recon["explained_variance"],
+                "latent_death_rate": latent_activity["death_rate"],
+                "latent_mean_active_per_sample": latent_activity["mean_active_per_sample"],
+                "latent_reuse_ratio": latent_activity["reuse_ratio"],
+                "latent_max_concepts_per_feature": latent_activity["max_concepts_per_feature"],
                 "mean_disentanglement": disentanglement["mean_disentanglement"],
                 "mean_predictive_performance": disentanglement["mean_performance"],
                 "mean_pathology_max_abs_corr": correlations["mean_pathology_max_abs_corr"],
@@ -358,6 +369,46 @@ def build_sae_sweep_plots(summary: pd.DataFrame, output_dir: Path) -> list[Path]
         plots.append(path)
 
     return plots
+
+
+def _summarize_latent_activity(z_train: np.ndarray, correlations: dict[str, object]) -> dict[str, float]:
+    if z_train.size == 0:
+        return {
+            "death_rate": float("nan"),
+            "mean_active_per_sample": float("nan"),
+            "reuse_ratio": float("nan"),
+            "max_concepts_per_feature": float("nan"),
+        }
+
+    active_mask = z_train > 1e-6
+    activity_rate = active_mask.mean(axis=0)
+    death_rate = float(np.mean(activity_rate <= 1e-4))
+    mean_active_per_sample = float(np.mean(active_mask.sum(axis=1)))
+
+    concept_rows = correlations.get("concepts", []) if isinstance(correlations, dict) else []
+    latent_counts: dict[int, int] = {}
+    if isinstance(concept_rows, list):
+        for row in concept_rows:
+            if not isinstance(row, dict):
+                continue
+            idx = row.get("latent_index")
+            if isinstance(idx, (int, np.integer)) and int(idx) >= 0:
+                latent_counts[int(idx)] = latent_counts.get(int(idx), 0) + 1
+
+    if latent_counts:
+        reused = [count for count in latent_counts.values() if count > 1]
+        reuse_ratio = float(len(reused) / len(latent_counts))
+        max_concepts_per_feature = float(max(latent_counts.values()))
+    else:
+        reuse_ratio = float("nan")
+        max_concepts_per_feature = float("nan")
+
+    return {
+        "death_rate": death_rate,
+        "mean_active_per_sample": mean_active_per_sample,
+        "reuse_ratio": reuse_ratio,
+        "max_concepts_per_feature": max_concepts_per_feature,
+    }
 
 
 def _build_sae_config(base: SAEConfig, overrides: dict[str, Any]) -> SAEConfig:
