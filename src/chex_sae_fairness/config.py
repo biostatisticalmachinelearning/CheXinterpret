@@ -38,6 +38,7 @@ class DataConfig:
     max_age: int = 120
     age_bins: list[int] = field(default_factory=lambda: [0, 40, 60, 80, 120])
     allowed_views: list[str] = field(default_factory=list)
+    max_rows_per_split: int | None = None
 
 
 @dataclass(slots=True)

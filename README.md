@@ -79,7 +79,23 @@ Pass `-y` to skip the confirmation prompt.
 
 ## 3) Run Flow
 
-## 3.1 Main end-to-end run
+## 3.1 Quick pipeline test (small data slice)
+
+Before committing to a full run (which takes days for feature extraction), validate
+the entire pipeline end-to-end on a small slice of data:
+
+```bash
+chex-run-study --config configs/test.yaml
+```
+
+`configs/test.yaml` limits each split to 100 images (~300 total), uses a small SAE
+(256 latent dims, 5 epochs), and reduces bootstrap samples to 20.  The full pipeline
+should complete in a few minutes once model weights are cached.
+
+The subset size is controlled by `data.max_rows_per_split` in the config.  Setting it
+to `null` (or omitting it) uses the full dataset.
+
+## 3.3 Main end-to-end run
 
 ```bash
 chex-run-study --config configs/default.yaml
@@ -94,13 +110,13 @@ Default behavior is comprehensive:
 5. Run full baseline/SAE/debiased evaluation.
 6. Export JSON summaries and figure artifacts.
 
-## 3.2 Single-SAE run
+## 3.4 Single-SAE run
 
 ```bash
 chex-run-study --config configs/default.yaml --single-sae
 ```
 
-## 3.3 Publication pipelines
+## 3.5 Publication pipelines
 
 ```bash
 chex-init-paper-config --output configs/publication.yaml
@@ -459,7 +475,7 @@ Primary configs:
 
 Important controls:
 
-- Data: `allowed_views` (e.g. `["frontal"]` to restrict to frontal-only; `[]` for all views)
+- Data: `allowed_views` (e.g. `["frontal"]` to restrict to frontal-only; `[]` for all views), `max_rows_per_split` (integer cap per split for fast pipeline tests; omit or `null` for full dataset)
 - SAE: `latent_dim`, `variant`, `topk_k`, `l1_lambda`, optimizer settings
 - Fairness: `debias_mode`, `debias_strength`, `threshold`
 - Publication supplement: seeds, uncertain policies, baseline methods, threshold grid, age-bin sets, missingness fractions

@@ -1,0 +1,91 @@
+# Test config — runs a small slice of data to validate the full pipeline quickly.
+#
+# Limits each split to 100 rows (300 total), cuts SAE training to 5 epochs,
+# and reduces bootstrap samples so a complete end-to-end run finishes in minutes
+# rather than days.  All other settings (paths, schema, model) mirror default.yaml.
+#
+# Usage:
+#   chex-run-study --config configs/test.yaml
+
+seed: 13
+
+paths:
+  image_root: "/media/little/da540527-69ef-4f3f-8a3f-9cf32c6afd6c/chexpert-plus/PNG/"
+  metadata_csv: "/home/little/Repositories/CheXinterpret/data-downloads/df_chexpert_plus_240401.csv"
+  chexbert_labels_json: "/home/little/Repositories/CheXinterpret/data-downloads/chexbert_labels.zip"
+  output_root: "outputs/test"
+
+schema:
+  image_path_col: "path_to_image"
+  split_col: "split"
+  patient_id_col: "patient_id"
+  age_col: "age"
+  sex_col: "sex"
+  race_col: "race"
+  pathology_cols:
+    - "No Finding"
+    - "Enlarged Cardiomediastinum"
+    - "Cardiomegaly"
+    - "Lung Opacity"
+    - "Lung Lesion"
+    - "Edema"
+    - "Consolidation"
+    - "Pneumonia"
+    - "Atelectasis"
+    - "Pneumothorax"
+    - "Pleural Effusion"
+    - "Pleural Other"
+    - "Fracture"
+    - "Support Devices"
+  metadata_cols:
+    - "age"
+    - "sex"
+    - "race"
+    - "ethnicity"
+    - "interpreter_needed"
+    - "insurance_type"
+    - "recent_bmi"
+    - "deceased"
+
+data:
+  allowed_splits: ["train", "valid", "test"]
+  validation_split_name: "valid"
+  test_split_name: "test"
+  uncertain_label_policy: "zero"
+  min_age: 18
+  max_age: 110
+  age_bins: [18, 35, 50, 65, 80, 120]
+  allowed_views: ["frontal"]
+  max_rows_per_split: 100  # 100 per split → ~300 images total
+
+features:
+  model_name: "StanfordAIMI/CheXagent-8b"
+  cache_dir: ".cache/huggingface"
+  device: "cuda"
+  batch_size: 8
+  num_workers: 4
+  precision: "fp16"
+  pooling: "mean"
+  force_recompute: false
+
+sae:
+  latent_dim: 256       # smaller than production (2048) for fast training
+  variant: "l1"
+  topk_k: 16
+  l1_lambda: 1.0e-4
+  learning_rate: 1.0e-3
+  weight_decay: 1.0e-6
+  batch_size: 64        # smaller to suit the tiny dataset
+  epochs: 5             # enough to verify the training loop, not for quality
+  eval_every_epochs: 1
+
+probes:
+  c_value: 1.0
+  max_iter: 500         # fewer iterations; dataset is tiny so convergence is fast
+
+fairness:
+  target_metric: "macro_auroc"
+  bootstrap_samples: 20  # just enough to confirm the bootstrap runs end-to-end
+  debias_strength: 1.0
+  debias_mode: "train_and_test"
+  threshold: 0.5

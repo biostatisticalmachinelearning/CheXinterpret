@@ -99,6 +99,20 @@ def build_manifest(cfg: ExperimentConfig) -> ManifestBuildResult:
     if len(frame) == 0:
         _raise_zero_rows_error(image_root)
 
+    if cfg.data.max_rows_per_split is not None:
+        limit = cfg.data.max_rows_per_split
+        frame = (
+            frame.groupby(cfg.schema.split_col, group_keys=False)
+            .apply(lambda g: g.sample(min(limit, len(g)), random_state=13))
+            .reset_index(drop=True)
+        )
+        logger.info(
+            "max_rows_per_split=%d: sampled manifest has %d rows across splits %s.",
+            limit,
+            len(frame),
+            sorted(frame[cfg.schema.split_col].unique().tolist()),
+        )
+
     return ManifestBuildResult(manifest=frame.loc[:, output_cols], dropped_rows=dropped_rows)
 
 
