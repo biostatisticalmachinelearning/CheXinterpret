@@ -17,6 +17,8 @@ def evaluate_multilabel_predictions(
     # because fairness interventions can change calibration at a fixed threshold.
     per_label_auroc: dict[str, float] = {}
     per_label_accuracy: dict[str, float] = {}
+    per_label_brier: dict[str, float] = {}
+    per_label_ece: dict[str, float] = {}
 
     for idx, label in enumerate(label_names):
         y = y_true[:, idx]
@@ -26,6 +28,8 @@ def evaluate_multilabel_predictions(
         else:
             per_label_auroc[label] = float(roc_auc_score(y, s))
         per_label_accuracy[label] = float(np.mean((s >= threshold).astype(int) == y.astype(int)))
+        per_label_brier[label] = float(np.mean((s - y.astype(float)) ** 2))
+        per_label_ece[label] = float(_expected_calibration_error(y.astype(int), s.astype(float)))
 
     valid_aurocs = [score for score in per_label_auroc.values() if not math.isnan(score)]
     macro_auroc = float(np.mean(valid_aurocs)) if valid_aurocs else float("nan")
@@ -33,12 +37,18 @@ def evaluate_multilabel_predictions(
     micro_accuracy = float(
         np.mean((y_score >= threshold).astype(int) == y_true.astype(int))
     )
+    macro_brier = float(np.mean(list(per_label_brier.values()))) if per_label_brier else float("nan")
+    macro_ece = float(np.mean(list(per_label_ece.values()))) if per_label_ece else float("nan")
     return {
         "macro_auroc": macro_auroc,
         "macro_accuracy": macro_accuracy,
         "micro_accuracy": micro_accuracy,
+        "macro_brier": macro_brier,
+        "macro_ece": macro_ece,
         "label_auroc": per_label_auroc,
         "label_accuracy": per_label_accuracy,
+        "label_brier": per_label_brier,
+        "label_ece": per_label_ece,
     }
 
 
@@ -205,3 +215,24 @@ def _worst_group_metric(
         return None
     group, score = min(candidates, key=lambda x: x[1])
     return {"group": group, "value": score}
+
+
+def _expected_calibration_error(y_true: np.ndarray, y_score: np.ndarray, n_bins: int = 10) -> float:
+    if len(y_true) == 0:
+        return float("nan")
+    bins = np.linspace(0.0, 1.0, n_bins + 1)
+    total = float(len(y_true))
+    ece = 0.0
+    for idx in range(n_bins):
+        lo, hi = bins[idx], bins[idx + 1]
+        if idx == n_bins - 1:
+            mask = (y_score >= lo) & (y_score <= hi)
+        else:
+            mask = (y_score >= lo) & (y_score < hi)
+        if not np.any(mask):
+            continue
+        frac = float(mask.mean())
+        accuracy = float(np.mean(y_true[mask]))
+        confidence = float(np.mean(y_score[mask]))
+        ece += frac * abs(accuracy - confidence)
+    return ece

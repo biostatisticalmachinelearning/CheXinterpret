@@ -1,0 +1,24 @@
+core:
+  sweep_config_path: "configs/sae_sweep.yaml"
+  run_name: null
+  force_recompute_features: false
+  debias_ablation_modes: ["train_and_test", "test_only"]
+  debias_ablation_strengths: [0.25, 0.5, 1.0, 1.5]
+
+supplement:
+  run_name: null
+  seeds: [13, 17, 23]
+  uncertain_policies: ["zero", "one", "ignore"]
+  debias_modes: ["train_and_test", "test_only"]
+  debias_strengths: [0.25, 0.5, 1.0, 1.5]
+  age_bin_sets:
+    - [18, 35, 50, 65, 80, 120]
+    - [18, 40, 60, 80, 120]
+    - [18, 45, 60, 75, 120]
+  permutation_repeats: 5
+  missing_metadata_fractions: [0.0, 0.1, 0.2]
+  baseline_methods: ["raw", "pca", "nmf", "group_reweighted", "group_threshold"]
+  fairness_thresholds: [0.3, 0.5, 0.7]
+  external_config_paths: []
+  human_eval_csv: null
+  force_recompute_features: false

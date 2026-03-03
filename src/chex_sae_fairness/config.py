@@ -123,6 +123,10 @@ class ExperimentConfig:
     def study_metrics_path(self) -> Path:
         return self.output_root / "study_metrics.json"
 
+    @property
+    def study_predictions_path(self) -> Path:
+        return self.output_root / "study_predictions.npz"
+
     def ensure_output_dirs(self) -> None:
         self.output_root.mkdir(parents=True, exist_ok=True)
 

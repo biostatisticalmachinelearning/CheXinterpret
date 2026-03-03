@@ -13,6 +13,12 @@ from chex_sae_fairness.data.feature_cache import load_or_create_feature_bundle
 from chex_sae_fairness.data.splits import build_split_masks
 from chex_sae_fairness.models.chexagent_features import load_feature_bundle
 from chex_sae_fairness.pipeline import run_full_study
+from chex_sae_fairness.publication import (
+    PublicationSpec,
+    run_core_publication_pipeline,
+    run_supplement_publication_pipeline,
+)
+from chex_sae_fairness.publication.spec import write_publication_spec_template
 from chex_sae_fairness.study_runner import create_timestamped_run_dir, run_comprehensive_study
 from chex_sae_fairness.sweep import run_sae_sweep
 from chex_sae_fairness.training.train_sae import train_sae_model
@@ -282,6 +288,77 @@ def run_sae_sweep_cli() -> None:
     logger.info("SAE sweep finished.")
     logger.info("Summary JSON: %s/summary.json", summary["output_dir"])
     logger.info("Summary CSV: %s", summary["summary_csv"])
+
+
+def run_core_publication_cli() -> None:
+    parser = argparse.ArgumentParser(description="Run core publication pipeline (figures/tables)")
+    parser.add_argument("--config", required=True, help="Path to base experiment YAML config")
+    parser.add_argument(
+        "--publication-config",
+        default=None,
+        help="Optional publication YAML for core/supplement settings",
+    )
+    _add_logging_args(parser)
+    args = parser.parse_args()
+
+    cfg = ExperimentConfig.from_yaml(args.config)
+    spec = PublicationSpec.from_yaml(args.publication_config)
+    log_path = (
+        Path(args.log_file).expanduser()
+        if args.log_file
+        else cfg.output_root / "publication" / "core" / "latest_run.log"
+    )
+    configure_logging(level=args.log_level, log_file=log_path)
+    logger.info("Starting core publication pipeline.")
+    logger.info("Base config: %s", Path(args.config).resolve())
+    if args.publication_config:
+        logger.info("Publication config: %s", Path(args.publication_config).resolve())
+    result = run_core_publication_pipeline(
+        config_path=args.config,
+        core_spec=spec.core,
+    )
+    logger.info("Core pipeline finished. Summary: %s", Path(result["run_dir"]) / "core_pipeline_summary.json")
+
+
+def run_supplement_publication_cli() -> None:
+    parser = argparse.ArgumentParser(description="Run supplementary publication pipeline (figures/tables)")
+    parser.add_argument("--config", required=True, help="Path to base experiment YAML config")
+    parser.add_argument(
+        "--publication-config",
+        default=None,
+        help="Optional publication YAML for core/supplement settings",
+    )
+    _add_logging_args(parser)
+    args = parser.parse_args()
+
+    cfg = ExperimentConfig.from_yaml(args.config)
+    spec = PublicationSpec.from_yaml(args.publication_config)
+    log_path = (
+        Path(args.log_file).expanduser()
+        if args.log_file
+        else cfg.output_root / "publication" / "supplement" / "latest_run.log"
+    )
+    configure_logging(level=args.log_level, log_file=log_path)
+    logger.info("Starting supplement publication pipeline.")
+    logger.info("Base config: %s", Path(args.config).resolve())
+    if args.publication_config:
+        logger.info("Publication config: %s", Path(args.publication_config).resolve())
+    result = run_supplement_publication_pipeline(
+        config_path=args.config,
+        spec=spec.supplement,
+    )
+    logger.info(
+        "Supplement pipeline finished. Summary: %s",
+        Path(result["run_dir"]) / "supplement_pipeline_summary.json",
+    )
+
+
+def init_publication_config_cli() -> None:
+    parser = argparse.ArgumentParser(description="Create a template publication pipeline config YAML")
+    parser.add_argument("--output", required=True, help="Where to write the template YAML")
+    args = parser.parse_args()
+    path = write_publication_spec_template(args.output)
+    print(f"Publication config template written: {path}")
 
 
 def audit_data_cli() -> None:

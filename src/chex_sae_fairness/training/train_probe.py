@@ -23,6 +23,7 @@ def fit_multilabel_probe(
     y_train: np.ndarray,
     max_iter: int = 2000,
     c_value: float = 1.0,
+    sample_weight: np.ndarray | None = None,
 ) -> MultilabelProbe:
     # Linear probe with per-label one-vs-rest heads gives stable performance and
     # straightforward interpretability for feature-space comparisons.
@@ -38,5 +39,6 @@ def fit_multilabel_probe(
         random_state=13,
     )
     classifier = OneVsRestClassifier(base)
-    classifier.fit(x_scaled, y_train)
+    fit_kwargs = {"sample_weight": sample_weight.astype(float)} if sample_weight is not None else {}
+    classifier.fit(x_scaled, y_train, **fit_kwargs)
     return MultilabelProbe(scaler=scaler, classifier=classifier)

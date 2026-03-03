@@ -30,6 +30,7 @@ By default, the pipeline is cache-first for CheXagent embeddings:
 - `src/chex_sae_fairness/training/`: SAE and probe trainers.
 - `src/chex_sae_fairness/evaluation/`: disentanglement and fairness metrics.
 - `src/chex_sae_fairness/mitigation/`: concept-space debiasing functions.
+- `src/chex_sae_fairness/publication/`: core/supplement paper pipelines, tables, and figure builders.
 - `src/chex_sae_fairness/pipeline.py`: end-to-end study runner.
 - `scripts/`: CLI wrappers.
 
@@ -95,6 +96,42 @@ Every run is saved into a timestamped directory so no results are overwritten:
 - `<output_root>/runs/YYYYMMDD_HHMMSS/`
 - key artifacts: `run_summary.json`, `configs/`, `sae_sweep/`, `workspace/study_metrics.json`, `figures/`
 
+## Publication Pipelines
+
+This repository now provides two dedicated, timestamped paper pipelines:
+
+1. **Core pipeline** (`chex-run-core-paper`)
+2. **Supplement pipeline** (`chex-run-supplement-paper`)
+
+Generate a publication config template:
+
+```bash
+chex-init-paper-config --output configs/publication.yaml
+```
+
+Run core figures/tables:
+
+```bash
+chex-run-core-paper --config configs/default.yaml --publication-config configs/publication.yaml
+```
+
+Run supplementary figures/tables:
+
+```bash
+chex-run-supplement-paper --config configs/default.yaml --publication-config configs/publication.yaml
+```
+
+Outputs are written to timestamped folders:
+
+- Core: `<output_root>/publication/core/YYYYMMDD_HHMMSS/`
+- Supplement: `<output_root>/publication/supplement/YYYYMMDD_HHMMSS/`
+
+Each pipeline writes:
+
+- `tables/*.csv` and `tables/*.md`
+- `figures/*.png`
+- `<pipeline>_pipeline_summary.json`
+
 Publication-ready figures are saved under:
 
 - `figures/sweep/`: hyperparameter ranking, disentanglement-vs-correlation, fairness-performance tradeoff, metric scorecard
@@ -142,6 +179,7 @@ All outputs are written to `paths.output_root`:
 - `features.npz`: CheXagent feature bundle + labels/metadata.
 - `sae.pt`: trained SAE checkpoint.
 - `study_metrics.json`: full report with model performance, fairness gaps, disentanglement metrics, and age-associated latent rankings.
+- `study_predictions.npz`: held-out labels/groups plus baseline/SAE/debiased score matrices for statistical and figure generation.
 
 Classifier performance now includes:
 

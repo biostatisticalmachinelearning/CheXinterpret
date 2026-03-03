@@ -141,7 +141,7 @@ def run_full_study(config_path: str) -> dict[str, object]:
     )
 
     logger.info("Training baseline probe on raw CheXagent features.")
-    baseline_perf, baseline_fairness = _fit_and_evaluate_probe(
+    baseline_scores, baseline_perf, baseline_fairness = _fit_and_evaluate_probe(
         x_train=x_train,
         x_test=x_test,
         y_train=y_train,
@@ -152,7 +152,7 @@ def run_full_study(config_path: str) -> dict[str, object]:
     )
 
     logger.info("Training probe on SAE concept features.")
-    concept_perf, concept_fairness = _fit_and_evaluate_probe(
+    concept_scores, concept_perf, concept_fairness = _fit_and_evaluate_probe(
         x_train=z_train,
         x_test=z_test,
         y_train=y_train,
@@ -178,7 +178,7 @@ def run_full_study(config_path: str) -> dict[str, object]:
     )
 
     logger.info("Training probe on debiased SAE concepts (%s).", cfg.fairness.debias_mode)
-    debiased_perf, debiased_fairness = _fit_and_evaluate_probe(
+    debiased_scores, debiased_perf, debiased_fairness = _fit_and_evaluate_probe(
         x_train=z_train_debiased,
         x_test=z_test_debiased,
         y_train=y_train,
@@ -250,10 +250,21 @@ def run_full_study(config_path: str) -> dict[str, object]:
         "age_associated_latents": age_assoc,
     }
 
+    np.savez_compressed(
+        cfg.study_predictions_path,
+        y_true=y_test.astype(np.float32),
+        age_groups=age_groups_test.astype(str),
+        pathology_cols=np.array(path_cols, dtype=object),
+        baseline_scores=baseline_scores.astype(np.float32),
+        concept_scores=concept_scores.astype(np.float32),
+        debiased_scores=debiased_scores.astype(np.float32),
+    )
+
     write_json(report, cfg.study_metrics_path)
     logger.info(
-        "Saved study report to %s (elapsed %.1fs).",
+        "Saved study report to %s and prediction bundle to %s (elapsed %.1fs).",
         cfg.study_metrics_path,
+        cfg.study_predictions_path,
         time.perf_counter() - start_time,
     )
     return report
@@ -267,7 +278,7 @@ def _fit_and_evaluate_probe(
     age_groups_test: np.ndarray,
     pathology_cols: list[str],
     cfg: ExperimentConfig,
-) -> tuple[dict[str, object], dict[str, object]]:
+) -> tuple[np.ndarray, dict[str, object], dict[str, object]]:
     probe = fit_multilabel_probe(
         x_train,
         y_train,
@@ -289,7 +300,7 @@ def _fit_and_evaluate_probe(
         threshold=cfg.fairness.threshold,
         bootstrap_samples=cfg.fairness.bootstrap_samples,
     )
-    return performance, fairness
+    return scores.astype(np.float32), performance, fairness
 
 
 def _resolve_device(requested: str) -> str:

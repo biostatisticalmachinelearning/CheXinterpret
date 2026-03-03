@@ -38,6 +38,9 @@ chex-train-sae = "chex_sae_fairness.cli:train_sae_cli"
 chex-run-study = "chex_sae_fairness.cli:run_study_cli"
 chex-run-sae-sweep = "chex_sae_fairness.cli:run_sae_sweep_cli"
 chex-audit-data = "chex_sae_fairness.cli:audit_data_cli"
+chex-run-core-paper = "chex_sae_fairness.cli:run_core_publication_cli"
+chex-run-supplement-paper = "chex_sae_fairness.cli:run_supplement_publication_cli"
+chex-init-paper-config = "chex_sae_fairness.cli:init_publication_config_cli"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
