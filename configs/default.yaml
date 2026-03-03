@@ -49,6 +49,7 @@ data:
 
 features:
   model_name: "StanfordAIMI/CheXagent-8b"
+  cache_dir: ".cache/huggingface"
   device: "cuda"
   batch_size: 8
   num_workers: 4

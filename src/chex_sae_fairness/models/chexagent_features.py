@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+from pathlib import Path
 import sys
 from typing import Any
 
@@ -20,6 +21,7 @@ logger = logging.getLogger(__name__)
 @dataclass(slots=True)
 class FeatureExtractionConfig:
     model_name: str
+    cache_dir: str | None
     device: str
     batch_size: int
     num_workers: int
@@ -32,13 +34,21 @@ class CheXagentVisionFeatureExtractor:
         self.cfg = cfg
         self.device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
         self.model_dtype = _resolve_model_dtype(cfg.precision, self.device)
+        _install_transformers_compat_shims()
+        cache_dir = _resolve_cache_dir(cfg.cache_dir)
+        self.cache_dir = cache_dir
 
-        logger.info("Loading CheXagent processor for %s", cfg.model_name)
-        self.processor = transformers.AutoProcessor.from_pretrained(cfg.model_name, trust_remote_code=True)
+        logger.info("Loading CheXagent processor for %s (cache_dir=%s)", cfg.model_name, cache_dir)
+        self.processor = transformers.AutoProcessor.from_pretrained(
+            cfg.model_name,
+            trust_remote_code=True,
+            cache_dir=cache_dir,
+        )
         logger.info("Loading CheXagent model weights for %s", cfg.model_name)
         self.model = _load_chexagent_model_strict(
             model_name=cfg.model_name,
             torch_dtype=self.model_dtype,
+            cache_dir=cache_dir,
         )
         self.model.eval().to(self.device)
 
@@ -148,10 +158,13 @@ def _collate_images(samples: list[dict[str, Any]]) -> dict[str, Any]:
 def _load_chexagent_model_strict(
     model_name: str,
     torch_dtype: torch.dtype | None,
+    cache_dir: str | None,
 ) -> torch.nn.Module:
     kwargs: dict[str, Any] = {"trust_remote_code": True}
     if torch_dtype is not None:
         kwargs["torch_dtype"] = torch_dtype
+    if cache_dir:
+        kwargs["cache_dir"] = cache_dir
     try:
         model = transformers.AutoModelForCausalLM.from_pretrained(model_name, **kwargs)
     except Exception as exc:  # pragma: no cover - depends on user env/model
@@ -306,3 +319,27 @@ def _resolve_model_dtype(precision: str, device: torch.device) -> torch.dtype | 
 def _prompt_batch(batch_size: int) -> list[str]:
     prompt = ' USER: <s>Describe this chest x-ray image. ASSISTANT: <s>'
     return [prompt] * batch_size
+
+
+def _install_transformers_compat_shims() -> None:
+    # Some remote-code checkpoints import a misspelled helper name from
+    # `transformers.pytorch_utils`. Add an alias to keep loading robust across
+    # Transformers versions.
+    try:
+        pytorch_utils = transformers.pytorch_utils
+    except Exception:
+        return
+    if hasattr(pytorch_utils, "find_pruneable_heads_and_indicies"):
+        return
+    canonical = getattr(pytorch_utils, "find_pruneable_heads_and_indices", None)
+    if canonical is not None:
+        setattr(pytorch_utils, "find_pruneable_heads_and_indicies", canonical)
+
+
+def _resolve_cache_dir(value: str | None) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    return str(Path(text).expanduser().resolve())

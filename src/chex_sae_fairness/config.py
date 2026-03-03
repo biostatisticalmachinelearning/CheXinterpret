@@ -42,6 +42,7 @@ class DataConfig:
 @dataclass(slots=True)
 class FeatureConfig:
     model_name: str
+    cache_dir: str | None = ".cache/huggingface"
     device: str = "cuda"
     batch_size: int = 8
     num_workers: int = 4

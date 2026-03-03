@@ -55,6 +55,7 @@ Update `configs/default.yaml` with your local paths and schema:
 - `schema.split_col`: can be inferred from `path_to_image` if missing.
 - `probes.c_value` / `probes.max_iter`: logistic probe hyperparameters used for pathology classifiers.
 - `fairness.debias_mode`: choose where age-concept residualization is applied (`train_and_test`, `test_only`, or `train_only`).
+- `features.cache_dir`: local HuggingFace cache directory for CheXagent model/processor weights (downloaded once, then reused).
 
 CheXpert Plus PNG layout (official examples) uses relative image paths like:
 

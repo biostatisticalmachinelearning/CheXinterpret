@@ -52,6 +52,7 @@ def load_or_create_feature_bundle(
     extractor = CheXagentVisionFeatureExtractor(
         FeatureExtractionConfig(
             model_name=cfg.features.model_name,
+            cache_dir=cfg.features.cache_dir,
             device=cfg.features.device,
             batch_size=cfg.features.batch_size,
             num_workers=cfg.features.num_workers,
