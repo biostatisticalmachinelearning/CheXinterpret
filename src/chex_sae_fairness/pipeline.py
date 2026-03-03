@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import time
 from pathlib import Path
 
 import numpy as np
@@ -25,17 +27,27 @@ from chex_sae_fairness.training.train_sae import encode_features, train_sae_mode
 from chex_sae_fairness.utils.io import write_json
 from chex_sae_fairness.utils.repro import seed_everything
 
+logger = logging.getLogger(__name__)
+
 
 def run_full_study(config_path: str) -> dict[str, object]:
+    start_time = time.perf_counter()
     cfg = ExperimentConfig.from_yaml(config_path)
     cfg.ensure_output_dirs()
     seed_everything(cfg.seed)
 
+    logger.info("Loading or creating CheXagent feature bundle (cache-first).")
     feature_result = load_or_create_feature_bundle(cfg, force_recompute=cfg.features.force_recompute)
     bundle = feature_result.bundle
     splits = bundle["split"].astype(str)
     pathologies = bundle["y_pathology"].astype(np.float32)
     x = bundle["features"].astype(np.float32)
+    logger.info(
+        "Feature bundle ready: n_samples=%d, feature_dim=%d, used_cache=%s",
+        x.shape[0],
+        x.shape[1] if x.ndim == 2 else -1,
+        feature_result.used_cache,
+    )
 
     path_cols = [str(c) for c in bundle["pathology_cols"].tolist()]
     metadata_cols = [str(c) for c in bundle["metadata_cols"].tolist()]
@@ -56,12 +68,34 @@ def run_full_study(config_path: str) -> dict[str, object]:
     age_groups_train = bundle["age_group"][train_mask].astype(str)
     age_groups_test = bundle["age_group"][test_mask].astype(str)
 
+    resolved_device = _resolve_device(cfg.features.device)
+    if resolved_device != cfg.features.device:
+        logger.warning(
+            "Requested device '%s' unavailable; using '%s' instead.",
+            cfg.features.device,
+            resolved_device,
+        )
+    logger.info(
+        "Split sizes: train=%d, valid=%d, test=%d",
+        int(train_mask.sum()),
+        int(valid_mask.sum()),
+        int(test_mask.sum()),
+    )
+    logger.info(
+        "Training SAE (variant=%s, latent_dim=%d, epochs=%d, batch_size=%d, device=%s).",
+        cfg.sae.variant,
+        cfg.sae.latent_dim,
+        cfg.sae.epochs,
+        cfg.sae.batch_size,
+        resolved_device,
+    )
     sae_output = train_sae_model(
         train_features=x_train,
         valid_features=x_valid,
         cfg=cfg.sae,
-        device=_resolve_device(cfg.features.device),
+        device=resolved_device,
     )
+    logger.info("SAE training complete. Saving checkpoint to %s", cfg.sae_checkpoint_path)
 
     torch.save(
         {
@@ -74,32 +108,37 @@ def run_full_study(config_path: str) -> dict[str, object]:
         cfg.sae_checkpoint_path,
     )
 
+    logger.info("Encoding train/test features into SAE latent space.")
     z_train = encode_features(
         model=sae_output.model,
         features=x_train,
         batch_size=max(256, cfg.sae.batch_size),
-        device=_resolve_device(cfg.features.device),
+        device=resolved_device,
     )
     z_test = encode_features(
         model=sae_output.model,
         features=x_test,
         batch_size=max(256, cfg.sae.batch_size),
-        device=_resolve_device(cfg.features.device),
+        device=resolved_device,
     )
 
+    logger.info("Reconstructing test features for reconstruction metrics.")
     x_hat_test = _reconstruct_features(
         model=sae_output.model,
         features=x_test,
         batch_size=max(256, cfg.sae.batch_size),
-        device=_resolve_device(cfg.features.device),
+        device=resolved_device,
     )
 
+    logger.info("Training baseline probe on raw CheXagent features.")
     baseline_probe = fit_multilabel_probe(x_train, y_train)
     baseline_scores = baseline_probe.predict_proba(x_test)
 
+    logger.info("Training probe on SAE concept features.")
     concept_probe = fit_multilabel_probe(z_train, y_train)
     concept_scores = concept_probe.predict_proba(z_test)
 
+    logger.info("Fitting concept residualizer for age-group debiasing.")
     residualizer = fit_concept_residualizer(
         z_train,
         age_groups=age_groups_train,
@@ -111,6 +150,7 @@ def run_full_study(config_path: str) -> dict[str, object]:
     debiased_probe = fit_multilabel_probe(z_train_debiased, y_train)
     debiased_scores = debiased_probe.predict_proba(z_test_debiased)
 
+    logger.info("Evaluating pathology performance and age-group fairness metrics.")
     baseline_perf = evaluate_multilabel_predictions(y_test, baseline_scores, path_cols)
     concept_perf = evaluate_multilabel_predictions(y_test, concept_scores, path_cols)
     debiased_perf = evaluate_multilabel_predictions(y_test, debiased_scores, path_cols)
@@ -140,6 +180,7 @@ def run_full_study(config_path: str) -> dict[str, object]:
         bootstrap_samples=cfg.fairness.bootstrap_samples,
     )
 
+    logger.info("Running disentanglement and latent-correlation analyses.")
     disentanglement = evaluate_disentanglement(
         z_train=z_train,
         z_test=z_test,
@@ -194,6 +235,11 @@ def run_full_study(config_path: str) -> dict[str, object]:
     }
 
     write_json(report, cfg.study_metrics_path)
+    logger.info(
+        "Saved study report to %s (elapsed %.1fs).",
+        cfg.study_metrics_path,
+        time.perf_counter() - start_time,
+    )
     return report
 
 

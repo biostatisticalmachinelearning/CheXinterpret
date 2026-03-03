@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
+import sys
 from typing import Any
 
 import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
 from transformers import AutoModel, AutoProcessor
 
 from chex_sae_fairness.data.chexpert_plus import CheXImageDataset
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -27,12 +32,20 @@ class CheXagentVisionFeatureExtractor:
         self.cfg = cfg
         self.device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
 
+        logger.info("Loading CheXagent processor for %s", cfg.model_name)
         self.processor = AutoProcessor.from_pretrained(cfg.model_name, trust_remote_code=True)
+        logger.info("Loading CheXagent model weights for %s", cfg.model_name)
         self.model = AutoModel.from_pretrained(cfg.model_name, trust_remote_code=True)
         self.model.eval().to(self.device)
 
         if cfg.precision == "fp16" and self.device.type == "cuda":
             self.model.half()
+        logger.info(
+            "CheXagent model ready on %s (precision=%s, pooling=%s)",
+            self.device,
+            cfg.precision,
+            cfg.pooling,
+        )
 
     def extract_from_manifest(self, manifest: pd.DataFrame) -> np.ndarray:
         dataset = CheXImageDataset(manifest)
@@ -45,16 +58,29 @@ class CheXagentVisionFeatureExtractor:
             collate_fn=_collate_images,
         )
 
+        logger.info(
+            "Starting feature extraction over %d images (%d batches).",
+            len(dataset),
+            len(loader),
+        )
         all_features: list[np.ndarray] = []
+        progress = tqdm(
+            loader,
+            desc="Extracting image features",
+            unit="batch",
+            disable=not sys.stderr.isatty(),
+        )
         with torch.no_grad():
-            for batch in loader:
+            for batch in progress:
                 features = self._encode_images(batch["images"])
                 all_features.append(features.detach().cpu().float().numpy())
 
         if not all_features:
             return np.empty((0, 0), dtype=np.float32)
 
-        return np.concatenate(all_features, axis=0).astype(np.float32)
+        output = np.concatenate(all_features, axis=0).astype(np.float32)
+        logger.info("Finished feature extraction with output shape=%s", tuple(output.shape))
+        return output
 
     def _encode_images(self, images: list[Any]) -> torch.Tensor:
         model_inputs = self.processor(images=images, return_tensors="pt")

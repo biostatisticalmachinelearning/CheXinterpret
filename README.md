@@ -81,6 +81,12 @@ End-to-end:
 chex-run-study --config configs/default.yaml
 ```
 
+Live progress is logged to console and to a file by default:
+
+- default file: `<output_root>/logs/run_study.log`
+- control verbosity with `--log-level` (e.g. `INFO`, `DEBUG`)
+- override file path with `--log-file /path/to/run.log`
+
 Before first run, audit your metadata/path wiring:
 
 ```bash

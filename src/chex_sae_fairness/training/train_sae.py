@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
+import sys
 
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, TensorDataset
+from tqdm.auto import tqdm
 
 from chex_sae_fairness.config import SAEConfig
 from chex_sae_fairness.models.sae import SparseAutoencoder, sae_loss
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -31,7 +36,13 @@ def encode_features(
     model.to(device)
 
     outputs: list[np.ndarray] = []
-    for (batch,) in loader:
+    progress = tqdm(
+        loader,
+        desc="Encoding SAE latents",
+        unit="batch",
+        disable=not sys.stderr.isatty(),
+    )
+    for (batch,) in progress:
         z = model.encode(batch.to(device))
         outputs.append(z.detach().cpu().numpy().astype(np.float32))
 
@@ -64,12 +75,27 @@ def train_sae_model(
 
     train_curve: list[dict[str, float]] = []
     valid_curve: list[dict[str, float]] = []
+    logger.info(
+        "SAE training started: train_rows=%d, valid_rows=%d, input_dim=%d, latent_dim=%d, variant=%s",
+        train_features.shape[0],
+        valid_features.shape[0],
+        train_features.shape[1],
+        cfg.latent_dim,
+        cfg.variant,
+    )
 
     for epoch in range(cfg.epochs):
         model.train()
         train_running = {"total": 0.0, "mse": 0.0, "sparsity": 0.0, "regularization": 0.0, "steps": 0}
 
-        for (batch,) in train_loader:
+        batch_iterator = tqdm(
+            train_loader,
+            desc=f"SAE train epoch {epoch + 1}/{cfg.epochs}",
+            unit="batch",
+            leave=False,
+            disable=not sys.stderr.isatty(),
+        )
+        for (batch,) in batch_iterator:
             batch = batch.to(device)
             x_hat, z = model(batch)
             loss = sae_loss(batch, x_hat, z, cfg.variant, cfg.l1_lambda)
@@ -83,12 +109,46 @@ def train_sae_model(
             train_running["sparsity"] += float(loss.sparsity.item())
             train_running["regularization"] += float(loss.regularization.item())
             train_running["steps"] += 1
+            batch_iterator.set_postfix(
+                loss=f"{loss.total.item():.4f}",
+                mse=f"{loss.mse.item():.4f}",
+            )
 
-        train_curve.append(_normalize_running(epoch, cfg.variant, train_running))
+        train_epoch_metrics = _normalize_running(epoch, cfg.variant, train_running)
+        train_curve.append(train_epoch_metrics)
 
+        valid_epoch_metrics: dict[str, float] | None = None
         if (epoch + 1) % cfg.eval_every_epochs == 0 or epoch == cfg.epochs - 1:
-            valid_curve.append(_evaluate_epoch(model, valid_loader, cfg.variant, cfg.l1_lambda, epoch, device))
+            valid_epoch_metrics = _evaluate_epoch(
+                model,
+                valid_loader,
+                cfg.variant,
+                cfg.l1_lambda,
+                epoch,
+                device,
+            )
+            valid_curve.append(valid_epoch_metrics)
 
+        if valid_epoch_metrics is not None:
+            logger.info(
+                "Epoch %d/%d | train_loss=%.6f train_mse=%.6f | valid_loss=%.6f valid_mse=%.6f",
+                epoch + 1,
+                cfg.epochs,
+                train_epoch_metrics["loss"],
+                train_epoch_metrics["mse"],
+                valid_epoch_metrics["loss"],
+                valid_epoch_metrics["mse"],
+            )
+        else:
+            logger.info(
+                "Epoch %d/%d | train_loss=%.6f train_mse=%.6f",
+                epoch + 1,
+                cfg.epochs,
+                train_epoch_metrics["loss"],
+                train_epoch_metrics["mse"],
+            )
+
+    logger.info("SAE training finished.")
     return SAETrainingOutput(model=model, train_curve=train_curve, valid_curve=valid_curve)
 
 
