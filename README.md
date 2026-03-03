@@ -55,6 +55,28 @@ chex-audit-data --config configs/default.yaml --sample-size 3000
 
 Use this before long runs to verify path resolution rate and split discovery.
 
+## 2.4 Clearing Cached Artifacts
+
+Cached outputs (manifest, features, SAE checkpoints, logs, run directories) can be
+cleared with:
+
+```bash
+python scripts/clear_cache.py --config configs/default.yaml
+```
+
+This clears all pipeline outputs but leaves the downloaded model weights intact.
+To target specific layers only:
+
+```bash
+# Recompute manifest and features (e.g. after adding new data or changing view filter)
+python scripts/clear_cache.py --config configs/default.yaml --manifest --features
+
+# Also wipe the CheXagent model weights (~33 GB re-download required)
+python scripts/clear_cache.py --config configs/default.yaml --model-weights
+```
+
+Pass `-y` to skip the confirmation prompt.
+
 ## 3) Run Flow
 
 ## 3.1 Main end-to-end run
