@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+import os
 
 import numpy as np
 
@@ -60,8 +61,14 @@ def load_or_create_feature_bundle(
             pooling=cfg.features.pooling,
         )
     )
-    logger.info("Extracting image features from %d manifest rows", len(manifest))
-    features = extractor.extract_from_manifest(manifest)
+
+    checkpoint_path = str(cfg.feature_path.with_suffix(".checkpoint.npz"))
+    logger.info(
+        "Extracting image features from %d manifest rows (checkpoint: %s)",
+        len(manifest),
+        checkpoint_path,
+    )
+    features = extractor.extract_from_manifest(manifest, checkpoint_path=checkpoint_path)
     logger.info("Feature extraction complete: shape=%s", tuple(features.shape))
 
     save_feature_bundle(
@@ -75,6 +82,12 @@ def load_or_create_feature_bundle(
         patient_id_col=cfg.schema.patient_id_col,
     )
     logger.info("Saved feature bundle to %s", cfg.feature_path)
+
+    try:
+        os.remove(checkpoint_path)
+        logger.debug("Removed extraction checkpoint %s", checkpoint_path)
+    except FileNotFoundError:
+        pass
 
     bundle = load_feature_bundle(str(cfg.feature_path))
     return FeatureBundleResult(bundle=bundle, used_cache=False, manifest_rows_dropped=dropped_rows)

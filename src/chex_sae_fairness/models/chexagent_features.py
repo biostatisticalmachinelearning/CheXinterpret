@@ -63,10 +63,44 @@ class CheXagentVisionFeatureExtractor:
             self.model_dtype,
         )
 
-    def extract_from_manifest(self, manifest: pd.DataFrame) -> np.ndarray:
+    def extract_from_manifest(
+        self,
+        manifest: pd.DataFrame,
+        checkpoint_path: str | None = None,
+        checkpoint_every: int = 50,
+    ) -> np.ndarray:
         dataset = CheXImageDataset(manifest)
+        n_total = len(dataset)
+
+        # Resume from checkpoint if one exists.
+        all_features: list[np.ndarray] = []
+        n_done = 0
+        if checkpoint_path is not None:
+            cp = Path(checkpoint_path)
+            if cp.exists():
+                try:
+                    with np.load(cp, allow_pickle=False) as data:
+                        all_features = [data["features"]]
+                        n_done = int(data["n_done"])
+                    logger.info(
+                        "Resuming feature extraction from checkpoint: %d/%d images done.",
+                        n_done,
+                        n_total,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Could not load checkpoint %s (%s). Starting fresh.", cp, exc
+                    )
+                    all_features = []
+                    n_done = 0
+
+        if n_done >= n_total:
+            logger.info("Checkpoint already covers all %d images; skipping extraction.", n_total)
+            return all_features[0] if all_features else np.empty((0, 0), dtype=np.float32)
+
+        subset = torch.utils.data.Subset(dataset, range(n_done, n_total))
         loader = DataLoader(
-            dataset,
+            subset,
             batch_size=self.cfg.batch_size,
             num_workers=self.cfg.num_workers,
             shuffle=False,
@@ -75,21 +109,32 @@ class CheXagentVisionFeatureExtractor:
         )
 
         logger.info(
-            "Starting feature extraction over %d images (%d batches).",
-            len(dataset),
+            "Starting feature extraction over %d images (%d batches), %d already done.",
+            n_total,
             len(loader),
+            n_done,
         )
-        all_features: list[np.ndarray] = []
+        n_extracted = 0
         progress = tqdm(
             loader,
             desc="Extracting image features",
             unit="batch",
+            initial=n_done // max(self.cfg.batch_size, 1),
+            total=(n_total + self.cfg.batch_size - 1) // self.cfg.batch_size,
             disable=not sys.stderr.isatty(),
         )
         with torch.no_grad():
-            for batch in progress:
-                features = self._encode_images(batch["images"])
-                all_features.append(features.detach().cpu().float().numpy())
+            for batch_idx, batch in enumerate(progress):
+                batch_features = self._encode_images(batch["images"])
+                all_features.append(batch_features.detach().cpu().float().numpy())
+                n_extracted += batch_features.shape[0]
+
+                if checkpoint_path is not None and (batch_idx + 1) % checkpoint_every == 0:
+                    current = np.concatenate(all_features, axis=0).astype(np.float32)
+                    np.savez_compressed(checkpoint_path, features=current, n_done=n_done + n_extracted)
+                    logger.debug(
+                        "Checkpoint saved: %d/%d images done.", n_done + n_extracted, n_total
+                    )
 
         if not all_features:
             return np.empty((0, 0), dtype=np.float32)

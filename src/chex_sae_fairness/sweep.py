@@ -144,6 +144,7 @@ def run_sae_sweep(
             metadata_train=metadata_train,
             metadata_test=metadata_test,
             metadata_cols=metadata_cols,
+            max_iter=base_cfg.probes.max_iter,
         )
         correlations = summarize_latent_correlations(
             z=z_test,

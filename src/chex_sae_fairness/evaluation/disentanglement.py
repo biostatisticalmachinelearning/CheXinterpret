@@ -27,6 +27,7 @@ def evaluate_disentanglement(
     metadata_train: pd.DataFrame,
     metadata_test: pd.DataFrame,
     metadata_cols: list[str],
+    max_iter: int = 2000,
 ) -> dict[str, object]:
     metrics: list[ConceptMetric] = []
 
@@ -35,7 +36,7 @@ def evaluate_disentanglement(
         y_te = y_path_test[:, idx].astype(int)
         if len(np.unique(y_tr)) < 2 or len(np.unique(y_te)) < 2:
             continue
-        result = _binary_probe(z_train, z_test, y_tr, y_te, concept)
+        result = _binary_probe(z_train, z_test, y_tr, y_te, concept, max_iter=max_iter)
         metrics.append(result)
 
     for concept in metadata_cols:
@@ -43,10 +44,10 @@ def evaluate_disentanglement(
         y_te = metadata_test[concept]
 
         if _is_numeric_series(y_tr):
-            result = _regression_probe(z_train, z_test, y_tr.to_numpy(), y_te.to_numpy(), concept)
+            result = _regression_probe(z_train, z_test, y_tr.to_numpy(), y_te.to_numpy(), concept, max_iter=max_iter)
             metrics.append(result)
         else:
-            result = _categorical_probe(z_train, z_test, y_tr.astype(str).to_numpy(), y_te.astype(str).to_numpy(), concept)
+            result = _categorical_probe(z_train, z_test, y_tr.astype(str).to_numpy(), y_te.astype(str).to_numpy(), concept, max_iter=max_iter)
             if result is not None:
                 metrics.append(result)
 
@@ -160,6 +161,7 @@ def _binary_probe(
     y_train: np.ndarray,
     y_test: np.ndarray,
     concept: str,
+    max_iter: int = 2000,
 ) -> ConceptMetric:
     scaler = StandardScaler()
     x_train = scaler.fit_transform(z_train)
@@ -169,7 +171,7 @@ def _binary_probe(
         penalty="l1",
         solver="saga",
         C=0.2,
-        max_iter=2000,
+        max_iter=max_iter,
         random_state=13,
     )
     clf.fit(x_train, y_train)
@@ -192,6 +194,7 @@ def _categorical_probe(
     y_train: np.ndarray,
     y_test: np.ndarray,
     concept: str,
+    max_iter: int = 2000,
 ) -> ConceptMetric | None:
     uniq_train = np.unique(y_train)
     uniq_test = np.unique(y_test)
@@ -206,9 +209,8 @@ def _categorical_probe(
         penalty="l1",
         solver="saga",
         C=0.2,
-        max_iter=3000,
+        max_iter=max_iter,
         random_state=13,
-        multi_class="auto",
     )
     clf.fit(x_train, y_train)
     pred = clf.predict(x_test)
@@ -230,12 +232,13 @@ def _regression_probe(
     y_train: np.ndarray,
     y_test: np.ndarray,
     concept: str,
+    max_iter: int = 2000,
 ) -> ConceptMetric:
     scaler = StandardScaler()
     x_train = scaler.fit_transform(z_train)
     x_test = scaler.transform(z_test)
 
-    reg = Lasso(alpha=0.001, max_iter=4000, random_state=13)
+    reg = Lasso(alpha=0.001, max_iter=max_iter, random_state=13)
     reg.fit(x_train, y_train)
     pred = reg.predict(x_test)
     score = float(r2_score(y_test, pred))

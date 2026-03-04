@@ -199,6 +199,7 @@ def run_full_study(config_path: str) -> dict[str, object]:
         metadata_train=metadata_train,
         metadata_test=metadata_test,
         metadata_cols=metadata_cols,
+        max_iter=cfg.probes.max_iter,
     )
     latent_correlations = summarize_latent_correlations(
         z=z_test,
