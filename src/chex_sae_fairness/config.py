@@ -65,6 +65,11 @@ class SAEConfig:
     batch_size: int = 512
     epochs: int = 40
     eval_every_epochs: int = 5
+    # Metric used to compute per-pair concept specificity in concept_analysis_pipeline.py.
+    # "eta2"            — demo_η² minus path_η²  (fast, but biased for rare binary targets)
+    # "conditional_auc" — macro-OVR demo AUC minus mean within-group path AUC
+    #                     (invariant to class imbalance; tests c ⊥ pathology | attr)
+    specificity_mode: str = "eta2"
 
 
 @dataclass(slots=True)

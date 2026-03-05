@@ -79,6 +79,7 @@ sae:
   batch_size: 64        # smaller to suit the tiny dataset
   epochs: 5             # enough to verify the training loop, not for quality
   eval_every_epochs: 1
+  specificity_mode: "eta2"  # "eta2" or "conditional_auc"
 
 probes:
   c_value: 1.0

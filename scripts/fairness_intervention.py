@@ -84,6 +84,9 @@ def parse_args() -> argparse.Namespace:
                    help="Max iterations for logistic regression (default: 1000)")
     p.add_argument("--device",     default=None,
                    help="torch device (default: cuda if available, else cpu)")
+    p.add_argument("--specificity-mode", default="eta2",
+                   choices=["eta2", "conditional_auc"],
+                   help="Must match the mode used in concept_analysis_pipeline.py (default: eta2)")
     return p.parse_args()
 
 
@@ -785,7 +788,13 @@ def main() -> None:
     cfg = ExperimentConfig.from_yaml(args.config)
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
 
-    sae_dir = Path(args.sae_dir) if args.sae_dir else cfg.output_root / "presentation" / "sae-eval"
+    spec_mode_default = getattr(args, "specificity_mode", "eta2")
+    if args.sae_dir:
+        sae_dir = Path(args.sae_dir)
+    elif spec_mode_default == "eta2":
+        sae_dir = cfg.output_root / "presentation" / "sae-eval"
+    else:
+        sae_dir = cfg.output_root / "presentation" / f"sae-eval-{spec_mode_default.replace('_', '-')}"
     if not sae_dir.exists():
         sys.exit(f"SAE-eval directory not found: {sae_dir}\nRun concept_analysis_pipeline.py first.")
 
@@ -881,9 +890,17 @@ def main() -> None:
         )
         sys.exit(1)
 
-    # Save list of ablated concepts
-    ablated_concepts_df = scores_df.loc[ablate_mask, ["concept_idx", f"demo_eta2_{args.attr}",
-                                                        f"path_eta2_{safe_path}", spec_col]]
+    # Save list of ablated concepts — component column names depend on specificity mode
+    spec_mode = getattr(args, "specificity_mode", "eta2")
+    if spec_mode == "conditional_auc":
+        demo_comp_col = f"demo_auc_{args.attr}"
+        path_comp_col = f"cond_path_auc_{args.attr}_{safe_path}"
+    else:
+        demo_comp_col = f"demo_eta2_{args.attr}"
+        path_comp_col = f"path_eta2_{safe_path}"
+    keep_cols = ["concept_idx", demo_comp_col, path_comp_col, spec_col]
+    keep_cols = [c for c in keep_cols if c in scores_df.columns]  # guard against missing cols
+    ablated_concepts_df = scores_df.loc[ablate_mask, keep_cols]
     ablated_concepts_df = ablated_concepts_df.sort_values(spec_col, ascending=False)
 
     # ── Load SAE and apply ablation ───────────────────────────────────────────

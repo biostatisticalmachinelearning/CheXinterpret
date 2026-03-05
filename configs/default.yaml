@@ -69,6 +69,7 @@ sae:
   batch_size: 512
   epochs: 40
   eval_every_epochs: 5
+  specificity_mode: "eta2"  # "eta2" or "conditional_auc"
 
 probes:
   c_value: 1.0

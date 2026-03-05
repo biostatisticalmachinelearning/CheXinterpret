@@ -51,6 +51,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 import torch
+from sklearn.metrics import roc_auc_score
 from torch.utils.data import DataLoader, TensorDataset
 
 logging.basicConfig(
@@ -111,6 +112,18 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         default=False,
         help="Skip the 56-intervention runner at the end (default: interventions run)",
+    )
+    parser.add_argument(
+        "--specificity-mode",
+        default=None,
+        choices=["eta2", "conditional_auc"],
+        help=(
+            "How to compute per-pair concept specificity. "
+            "'eta2': demo_η² − path_η² (default, fast). "
+            "'conditional_auc': macro-OVR demo AUC minus mean within-group path AUC "
+            "(class-imbalance invariant; tests c ⊥ pathology | attr). "
+            "Overrides sae.specificity_mode in the config."
+        ),
     )
     return parser.parse_args()
 
@@ -271,25 +284,102 @@ def eta_squared_categorical(z_col: np.ndarray, cat_target: np.ndarray) -> float:
     return float(np.clip(ss_between / ss_total, 0.0, 1.0))
 
 
+# ── AUC-based specificity metrics (conditional_auc mode) ─────────────────────
+
+def _valid_cat_mask(z_col: np.ndarray, cat_target: np.ndarray) -> np.ndarray:
+    return (
+        np.array([str(v) not in {"nan", "None", "none", ""} for v in cat_target], dtype=bool)
+        & np.isfinite(z_col)
+    )
+
+
+def demo_auc_ovr(z_col: np.ndarray, cat_target: np.ndarray) -> float:
+    """Macro one-vs-rest AUC of concept activation predicting a categorical demographic.
+
+    For a binary attribute (e.g. sex) this reduces to the standard binary AUC.
+    For multi-class attributes (e.g. age_group) it averages the per-group OVR AUCs.
+    Returns a value in [0.5, 1]: 0.5 = no information, 1 = perfect prediction.
+    """
+    mask = _valid_cat_mask(z_col, cat_target)
+    if mask.sum() < 3:
+        return float("nan")
+    z = z_col[mask]
+    cats = cat_target[mask].astype(str)
+    groups = np.unique(cats)
+    if len(groups) < 2:
+        return float("nan")
+    aucs = []
+    for g in groups:
+        y_bin = (cats == g).astype(int)
+        if y_bin.sum() < MIN_POSITIVES or (len(y_bin) - y_bin.sum()) < MIN_POSITIVES:
+            continue
+        try:
+            aucs.append(float(roc_auc_score(y_bin, z)))
+        except Exception:
+            continue
+    return float(np.mean(aucs)) if aucs else float("nan")
+
+
+def conditional_path_auc(
+    z_col: np.ndarray,
+    y_binary: np.ndarray,
+    attr_values: np.ndarray,
+) -> float:
+    """Mean AUC(concept → pathology) computed within each demographic stratum.
+
+    Directly tests c ⊥ pathology | attr.  A pure demographic confound returns
+    ≈ 0.5 here (concept adds no rank-ordering power for pathology once we
+    condition on which demographic group the patient belongs to).  A concept
+    that directly encodes pathology will exceed 0.5 even within every stratum.
+
+    Only strata with >= MIN_POSITIVES positive cases contribute to the mean.
+    """
+    mask = _valid_cat_mask(z_col, attr_values) & np.isfinite(y_binary)
+    if mask.sum() < 3:
+        return float("nan")
+    z = z_col[mask]
+    y = y_binary[mask].astype(float)
+    cats = attr_values[mask].astype(str)
+    aucs = []
+    for g in np.unique(cats):
+        m = cats == g
+        y_g, z_g = y[m], z[m]
+        if len(np.unique(y_g)) < 2 or (y_g == 1).sum() < MIN_POSITIVES:
+            continue
+        try:
+            aucs.append(float(roc_auc_score(y_g, z_g)))
+        except Exception:
+            continue
+    return float(np.mean(aucs)) if aucs else float("nan")
+
+
 def compute_concept_scores(
     z: np.ndarray,
     y_pathology: np.ndarray,
     pathology_cols: list[str],
     attr_arrays: dict[str, np.ndarray],
+    specificity_mode: str = "eta2",
 ) -> pd.DataFrame:
-    """Compute η² for every concept vs every target and per-pair specificity.
+    """Compute per-concept relevance scores and per-pair specificity.
 
-    Per-pair specificity for concept c, demographic attr A, pathology P:
-        spec(c, A, P) = demo_η²_A(c) − path_η²_P(c)
-
-    Columns in returned DataFrame:
+    Always computed (both modes):
         concept_idx
-        demo_eta2_<attr>           — η² vs each demographic attribute
-        path_eta2_<safe_path>      — η² vs each pathology label
-        spec_<attr>_<safe_path>    — per-pair specificity (one col per attr × path)
-        max_demo_eta2              — max across attributes (summary)
-        max_path_eta2              — max across pathologies (summary)
+        demo_eta2_<attr>              — η² vs each demographic attribute
+        path_eta2_<safe_path>         — η² vs each pathology label
+        max/mean_demo_eta2, max/mean_path_eta2  (summary stats for grid plots)
+
+    Additionally in 'conditional_auc' mode:
+        demo_auc_<attr>               — macro OVR AUC (demographic prediction)
+        cond_path_auc_<attr>_<safe_p> — mean within-group AUC (c ⊥ path | attr)
+
+    In both modes:
+        spec_<attr>_<safe_path>       — per-pair specificity:
+            eta2:            demo_η²_attr − path_η²_path
+            conditional_auc: demo_auc_attr − cond_path_auc_attr_path
     """
+    if specificity_mode not in ("eta2", "conditional_auc"):
+        raise ValueError(f"Unknown specificity_mode: {specificity_mode!r}")
+
     n_concepts = z.shape[1]
     safe_paths = [_safe(p) for p in pathology_cols]
     rows: list[dict] = []
@@ -298,33 +388,51 @@ def compute_concept_scores(
         z_col = z[:, c_idx]
         row: dict = {"concept_idx": c_idx}
 
-        # ── Pathology η² (binary) ────────────────────────────────────────────
+        # ── η² (always computed — used for summary stats and activation dist plots) ──
         path_eta2: dict[str, float] = {}
-        for p_idx, (pname, safe_p) in enumerate(zip(pathology_cols, safe_paths)):
+        for p_idx, (_, safe_p) in enumerate(zip(pathology_cols, safe_paths)):
             val = eta_squared_binary(z_col, y_pathology[:, p_idx].astype(float))
             row[f"path_eta2_{safe_p}"] = val
             path_eta2[safe_p] = val
 
-        # ── Demographic η² (categorical) ─────────────────────────────────────
         demo_eta2: dict[str, float] = {}
         for attr, attr_vals in attr_arrays.items():
             val = eta_squared_categorical(z_col, attr_vals)
             row[f"demo_eta2_{attr}"] = val
             demo_eta2[attr] = val
 
-        # ── Per-pair specificity ──────────────────────────────────────────────
-        for attr, de in demo_eta2.items():
-            for safe_p, pe in path_eta2.items():
-                if np.isfinite(de) and np.isfinite(pe):
-                    row[f"spec_{attr}_{safe_p}"] = de - pe
-                else:
-                    row[f"spec_{attr}_{safe_p}"] = float("nan")
+        # ── AUC-based scores (conditional_auc mode only) ──────────────────────
+        if specificity_mode == "conditional_auc":
+            demo_score: dict[str, float] = {}
+            for attr, attr_vals in attr_arrays.items():
+                val = demo_auc_ovr(z_col, attr_vals)
+                row[f"demo_auc_{attr}"] = val
+                demo_score[attr] = val
 
-        # ── Summary statistics (for scatter / grid plots) ────────────────────
+            # conditional path AUC is per (attr, path) pair
+            cond_path_score: dict[tuple[str, str], float] = {}
+            for attr, attr_vals in attr_arrays.items():
+                for p_idx, (_, safe_p) in enumerate(zip(pathology_cols, safe_paths)):
+                    val = conditional_path_auc(z_col, y_pathology[:, p_idx].astype(float), attr_vals)
+                    row[f"cond_path_auc_{attr}_{safe_p}"] = val
+                    cond_path_score[(attr, safe_p)] = val
+
+        # ── Per-pair specificity ───────────────────────────────────────────────
+        if specificity_mode == "eta2":
+            for attr, de in demo_eta2.items():
+                for safe_p, pe in path_eta2.items():
+                    row[f"spec_{attr}_{safe_p}"] = (de - pe) if (np.isfinite(de) and np.isfinite(pe)) else float("nan")
+        else:  # conditional_auc
+            for attr, de in demo_score.items():
+                for safe_p in safe_paths:
+                    pe = cond_path_score.get((attr, safe_p), float("nan"))
+                    row[f"spec_{attr}_{safe_p}"] = (de - pe) if (np.isfinite(de) and np.isfinite(pe)) else float("nan")
+
+        # ── Summary statistics (for scatter / grid plots, always η²-based) ───
         valid_demo = [v for v in demo_eta2.values() if np.isfinite(v)]
         valid_path = [v for v in path_eta2.values() if np.isfinite(v)]
-        row["max_demo_eta2"] = float(np.max(valid_demo)) if valid_demo else float("nan")
-        row["max_path_eta2"] = float(np.max(valid_path)) if valid_path else float("nan")
+        row["max_demo_eta2"]  = float(np.max(valid_demo))  if valid_demo else float("nan")
+        row["max_path_eta2"]  = float(np.max(valid_path))  if valid_path else float("nan")
         row["mean_demo_eta2"] = float(np.mean(valid_demo)) if valid_demo else float("nan")
         row["mean_path_eta2"] = float(np.mean(valid_path)) if valid_path else float("nan")
 
@@ -342,17 +450,26 @@ def _plot_top10_per_pair(
     k: int,
     latent_dim: int,
     out_dir: Path,
+    specificity_mode: str = "eta2",
 ) -> None:
-    """3-bar cluster plot: top-10 concepts ranked by spec(attr, pathology).
-
-    Bars show demo_η²_attr, path_η²_pathology, and pair_specificity for each concept.
-    """
+    """3-bar cluster plot: top-10 concepts ranked by spec(attr, pathology)."""
     safe_p = _safe(pathology)
     spec_col = f"spec_{attr}_{safe_p}"
-    demo_col = f"demo_eta2_{attr}"
-    path_col = f"path_eta2_{safe_p}"
 
-    if spec_col not in scores_df.columns:
+    if specificity_mode == "conditional_auc":
+        demo_col = f"demo_auc_{attr}"
+        path_col = f"cond_path_auc_{attr}_{safe_p}"
+        demo_label = f"demo AUC ({attr.replace('_',' ')})"
+        path_label = f"cond. path AUC ({pathology})"
+        y_label = "AUC"
+    else:
+        demo_col = f"demo_eta2_{attr}"
+        path_col = f"path_eta2_{safe_p}"
+        demo_label = f"demo η² ({attr.replace('_',' ')})"
+        path_label = f"path η² ({pathology})"
+        y_label = "η²"
+
+    if spec_col not in scores_df.columns or demo_col not in scores_df.columns:
         return
 
     sub = scores_df[[spec_col, demo_col, path_col, "concept_idx"]].dropna(subset=[spec_col])
@@ -369,17 +486,17 @@ def _plot_top10_per_pair(
     width = 0.25
 
     fig, ax = plt.subplots(figsize=(max(8, len(labels) * 0.9), 4.5))
-    ax.bar(x - width, demo_vals, width, label=f"demo η² ({attr.replace('_',' ')})", color="#4C78A8", alpha=0.85)
-    ax.bar(x,          path_vals, width, label=f"path η² ({pathology})",              color="#F58518", alpha=0.85)
-    ax.bar(x + width,  spec_vals, width, label="pair specificity (demo−path)",         color="#54A24B", alpha=0.85)
+    ax.bar(x - width, demo_vals, width, label=demo_label,                color="#4C78A8", alpha=0.85)
+    ax.bar(x,          path_vals, width, label=path_label,               color="#F58518", alpha=0.85)
+    ax.bar(x + width,  spec_vals, width, label="pair specificity (demo−path)", color="#54A24B", alpha=0.85)
 
     ax.axhline(0, color="black", linewidth=0.6, linestyle="--")
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=8)
-    ax.set_ylabel("η²")
+    ax.set_ylabel(y_label)
     ax.set_title(
         f"Top-{TOP_N} concepts  ·  demo={attr.replace('_',' ')}  ·  path={pathology}\n"
-        f"SAE: k={k}, latent_dim={latent_dim}",
+        f"SAE: k={k}, latent_dim={latent_dim}  ·  mode={specificity_mode}",
         fontsize=9,
     )
     ax.legend(fontsize=8)
@@ -444,27 +561,33 @@ def _plot_activation_dist(
     k: int,
     latent_dim: int,
     out_dir: Path,
+    specificity_mode: str = "eta2",
 ) -> None:
     """Box plots of top-5 concepts' activations, split by demographic group.
 
-    Top concepts selected by demo_η²_attr — shows whether the concepts that are
-    most correlated with this attribute activate differently across groups.
+    Concepts are selected by the most relevant demographic score for the active mode:
+    demo_auc in conditional_auc mode, demo_eta2 otherwise.
     """
-    demo_col = f"demo_eta2_{attr}"
-    if demo_col not in scores_df.columns:
+    # Select top concepts by the mode-appropriate demo score; fall back to eta2
+    if specificity_mode == "conditional_auc" and f"demo_auc_{attr}" in scores_df.columns:
+        select_col = f"demo_auc_{attr}"
+        score_label = "AUC"
+    else:
+        select_col = f"demo_eta2_{attr}"
+        score_label = "η²"
+
+    if select_col not in scores_df.columns:
         return
 
     top5 = (
-        scores_df[["concept_idx", demo_col]]
-        .dropna(subset=[demo_col])
-        .nlargest(TOP_DIST, demo_col)
+        scores_df[["concept_idx", select_col]]
+        .dropna(subset=[select_col])
+        .nlargest(TOP_DIST, select_col)
     )
     if top5.empty:
         return
 
-    groups = sorted(
-        np.unique(attr_vals[~pd.isna(attr_vals)].astype(str))
-    )
+    groups = sorted(np.unique(attr_vals[~pd.isna(attr_vals)].astype(str)))
     if len(groups) < 2:
         return
 
@@ -473,7 +596,7 @@ def _plot_activation_dist(
 
     for ax_i, (_, row) in enumerate(top5.iterrows()):
         c_idx = int(row["concept_idx"])
-        eta2_val = float(row[demo_col])
+        score_val = float(row[select_col])
         ax = axes[0][ax_i]
         data_groups = [z[attr_vals.astype(str) == g, c_idx] for g in groups]
         bp = ax.boxplot(
@@ -487,7 +610,7 @@ def _plot_activation_dist(
             patch.set_alpha(0.7)
         group_labels = [f"{g}\n(n={len(data_groups[gi])})" for gi, g in enumerate(groups)]
         ax.set_xticklabels(group_labels, rotation=30, ha="right", fontsize=7)
-        ax.set_title(f"c{c_idx}\nη²={eta2_val:.3f}", fontsize=8)
+        ax.set_title(f"c{c_idx}\n{score_label}={score_val:.3f}", fontsize=8)
         ax.set_ylabel("Activation" if ax_i == 0 else "")
 
     fig.suptitle(
@@ -788,7 +911,12 @@ def _run_all_interventions(cfg, base_out: Path, args: argparse.Namespace) -> Non
     logger.info("Running interventions for all %d (attr, pathology) pairs…", n_pairs)
 
     intervention_script = Path(__file__).parent / "fairness_intervention.py"
-    interventions_out = base_out.parent / "interventions"
+    # Keep interventions from different modes in separate sibling directories
+    spec_mode = getattr(args, "specificity_mode", None) or "eta2"
+    if spec_mode == "eta2":
+        interventions_out = base_out.parent / "interventions"
+    else:
+        interventions_out = base_out.parent / f"interventions-{spec_mode.replace('_', '-')}"
 
     for i, row in enumerate(pairs):
         attr = row.attr
@@ -801,6 +929,7 @@ def _run_all_interventions(cfg, base_out: Path, args: argparse.Namespace) -> Non
             "--pathology", pathology,
             "--sae-dir", str(base_out),
             "--output-dir", str(interventions_out),
+            "--specificity-mode", spec_mode,
             "--lr-mode", "both",
             "--threshold", "0.02",
         ]
@@ -968,7 +1097,17 @@ def main() -> None:
     cfg = ExperimentConfig.from_yaml(args.config)
     bundle = load_bundle(cfg.feature_path)
 
-    base_out = Path(args.output_dir) if args.output_dir else cfg.output_root / "presentation" / "sae-eval"
+    # Resolve specificity mode: CLI flag > config > default "eta2"
+    spec_mode = args.specificity_mode or getattr(cfg.sae, "specificity_mode", "eta2")
+    logger.info("Specificity mode: %s", spec_mode)
+
+    # Output dir encodes mode so both runs can coexist side by side
+    if args.output_dir:
+        base_out = Path(args.output_dir)
+    elif spec_mode == "eta2":
+        base_out = cfg.output_root / "presentation" / "sae-eval"
+    else:
+        base_out = cfg.output_root / "presentation" / f"sae-eval-{spec_mode.replace('_', '-')}"
     base_out.mkdir(parents=True, exist_ok=True)
     grid_out = base_out / "grid"
     (grid_out / "pair_heatmaps").mkdir(parents=True, exist_ok=True)
@@ -1060,11 +1199,14 @@ def main() -> None:
         z_train_enc = encode_all(model, x_train, device)
 
         logger.info(
-            "  Computing η² for %d concepts × %d targets (on training set)…",
-            latent_dim,
+            "  Computing concept scores (%s) for %d concepts × %d targets (on training set)…",
+            spec_mode, latent_dim,
             len(pathology_cols) + len(attr_arrays_train),
         )
-        scores_df = compute_concept_scores(z_train_enc, y_train, pathology_cols, attr_arrays_train)
+        scores_df = compute_concept_scores(
+            z_train_enc, y_train, pathology_cols, attr_arrays_train,
+            specificity_mode=spec_mode,
+        )
         scores_df.to_csv(run_out / "concept_scores.csv", index=False)
         logger.info("  Saved concept_scores.csv (%d rows, %d cols)", len(scores_df), len(scores_df.columns))
 
@@ -1072,7 +1214,7 @@ def main() -> None:
         n_pair_plots = 0
         for attr in attr_names:
             for pathology in pathology_cols:
-                _plot_top10_per_pair(scores_df, attr, pathology, k, latent_dim, pair_out)
+                _plot_top10_per_pair(scores_df, attr, pathology, k, latent_dim, pair_out, specificity_mode=spec_mode)
                 n_pair_plots += 1
         logger.info("  Saved %d per-pair top-10 plots → per_pair/", n_pair_plots)
 
@@ -1081,7 +1223,7 @@ def main() -> None:
 
         # ── Activation distribution plots ─────────────────────────────────────
         for attr in attr_names:
-            _plot_activation_dist(z_train_enc, scores_df, attr, attr_arrays_train[attr], k, latent_dim, run_out)
+            _plot_activation_dist(z_train_enc, scores_df, attr, attr_arrays_train[attr], k, latent_dim, run_out, specificity_mode=spec_mode)
 
         n_path_plots = _plot_activation_dist_pathology(
             z_train_enc, y_train, pathology_cols, scores_df, k, latent_dim, run_out
