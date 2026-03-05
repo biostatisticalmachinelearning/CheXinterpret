@@ -43,10 +43,11 @@ data:
   validation_split_name: "valid"
   test_split_name: "test"
   uncertain_label_policy: "zero"
-  min_age: 18
-  max_age: 110
-  age_bins: [18, 35, 50, 65, 80, 120]
+  min_age: 0
+  max_age: 120
+  age_bins: [12, 24, 36, 48, 60, 72, 84, 96]
   allowed_views: ["frontal"]
+  min_valid_fraction: 0.10
 
 features:
   model_name: "StanfordAIMI/CheXagent-8b"

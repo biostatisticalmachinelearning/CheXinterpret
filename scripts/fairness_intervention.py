@@ -35,6 +35,7 @@ from pathlib import Path
 
 import matplotlib
 matplotlib.use("Agg")
+import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -343,8 +344,12 @@ def _plot_tpr_disparity_heatmap(
     fig, ax = plt.subplots(figsize=(len(pivot.columns) * 2.2 + 1.5, len(pivot) * 0.55 + 2))
     sns.heatmap(pivot, ax=ax, annot=True, fmt=".2f", cmap="YlOrRd",
                 vmin=0, vmax=1, linewidths=0.4,
-                cbar_kws={"label": "TPR disparity (max − min)"})
-    ax.set_title(f"TPR Disparity — {title_tag}")
+                cbar_kws={"label": "TPR disparity (max − min)  ↓ lower = more fair"})
+    ax.set_title(
+        f"TPR Disparity — {title_tag}\n"
+        "Lower values = more equitable sensitivity across groups  (target: 0)",
+        fontsize=9,
+    )
     ax.set_xlabel("")
     ax.set_ylabel("")
     ax.tick_params(axis="x", labelsize=9)
@@ -371,12 +376,12 @@ def _plot_tpr_by_group(
     palette = sns.color_palette("tab10", len(groups))
 
     fig, ax = plt.subplots(figsize=(max(10, len(pathologies) * 0.9), 5))
-    overall_vals = [overall_tpr.get(p) for p in pathologies]
+    overall_vals = [_nan(overall_tpr.get(p)) for p in pathologies]
     ax.bar(x + (-(n_slots - 1) / 2) * width, overall_vals, width,
            label="Overall", color="#888888", alpha=0.9, hatch="//", edgecolor="white")
     for i, group in enumerate(groups):
         grp = df[df["group"] == group].set_index("pathology")["tpr"]
-        tprs = [grp.get(p, float("nan")) for p in pathologies]
+        tprs = [_nan(grp.get(p, float("nan"))) for p in pathologies]
         ax.bar(x + (i + 1 - (n_slots - 1) / 2) * width, tprs, width,
                label=str(group), color=palette[i], alpha=0.85)
 
@@ -463,7 +468,8 @@ def _plot_auroc_comparison(results: list[EvalResult], pathology_cols: list[str],
     ax.set_xticklabels(valid_paths, rotation=40, ha="right", fontsize=8)
     ax.set_ylabel("AUROC")
     ax.set_ylim(0, 1.05)
-    ax.set_title("AUROC Comparison — Original vs Ablated Embeddings")
+    intervention_name = results[-1].name if len(results) > 1 else "intervention"
+    ax.set_title(f"AUROC Comparison — baseline vs {intervention_name}")
     ax.legend(fontsize=9)
     fig.tight_layout()
     fig.savefig(out_dir / "auroc_comparison.png", dpi=150)
@@ -503,13 +509,18 @@ def _plot_tpr_disparity_comparison(
         sns.heatmap(pivot, ax=ax, annot=True, fmt=".2f", cmap="YlOrRd",
                     vmin=0, vmax=1, linewidths=0.4,
                     cbar=(col_idx == n - 1),
-                    cbar_kws={"label": "TPR disparity"} if col_idx == n - 1 else {})
+                    cbar_kws={"label": "TPR disparity  ↓ lower = more fair"} if col_idx == n - 1 else {})
         ax.set_title(res.name, fontsize=9)
         ax.set_xlabel("")
         ax.set_ylabel("")
         ax.tick_params(axis="x", labelsize=8)
 
-    fig.suptitle("TPR Disparity Before and After Concept Ablation", fontsize=10, y=1.01)
+    intervention_name = results[-1].name if len(results) > 1 else "intervention"
+    fig.suptitle(
+        f"TPR Disparity: baseline vs {intervention_name}\n"
+        "Lower values = more equitable sensitivity across groups  (target: 0)",
+        fontsize=9, y=1.02,
+    )
     fig.tight_layout()
     fig.savefig(out_dir / "tpr_disparity_comparison.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -519,7 +530,13 @@ def _plot_tpr_disparity_comparison(
 def _plot_tpr_by_group_comparison(
     results: list[EvalResult], attribute: str, pathology_cols: list[str], out_dir: Path
 ) -> None:
-    """Grouped bar chart: all conditions shown for each (pathology, group) combination."""
+    """Grouped bar chart: paired bars (baseline | intervention) for overall + each group.
+
+    Layout per pathology cluster:
+      [Overall_A | Overall_B | Group1_A | Group1_B | Group2_A | Group2_B | ...]
+    where A = results[0] (baseline), B = results[1] (intervention).
+    Always called with exactly 2 conditions.
+    """
     all_dfs = [r.tpr_df[r.tpr_df["attribute"] == attribute] for r in results]
     all_groups = sorted(set(g for df in all_dfs for g in df["group"].dropna().unique()))
     pathologies = [p for p in pathology_cols
@@ -527,46 +544,70 @@ def _plot_tpr_by_group_comparison(
     if not pathologies or not all_groups:
         return
 
-    # x-axis: pathologies; within each cluster: groups × conditions
     n_groups = len(all_groups)
-    n_cond = len(results)
-    n_slots = n_groups * n_cond + 1          # +1 for overall bar
-    width = min(0.9 / n_slots, 0.18)
+    # Slots per pathology: 1 pair (overall) + n_groups pairs = 2 * (1 + n_groups)
+    n_pairs = 1 + n_groups          # overall pair + one pair per group
+    n_slots = 2 * n_pairs
+    width = min(0.85 / n_slots, 0.15)
     x = np.arange(len(pathologies))
 
-    fig, ax = plt.subplots(figsize=(max(12, len(pathologies) * 1.0), 5))
-
-    # Overall bar per condition (hatched)
-    for ci, res in enumerate(results):
-        overall_vals = [res.overall_tpr.get(p) for p in pathologies]
-        offset = (ci - (n_cond - 1) / 2) * width - (n_groups * n_cond / 2) * width
-        ax.bar(x + offset, overall_vals, width,
-               label=f"{res.name} (Overall)",
-               color=res.color, alpha=0.5, hatch="//", edgecolor="white")
-
-    # Per-group bars
     group_palette = sns.color_palette("tab10", n_groups)
+
+    fig, ax = plt.subplots(figsize=(max(12, len(pathologies) * 1.2), 5))
+
+    # Build slot indices:
+    #   slots 0,1 → overall A, overall B
+    #   slots 2,3 → group0 A, group0 B
+    #   slots 4,5 → group1 A, group1 B  ...
+    # offset = (slot - (n_slots - 1) / 2) * width
+
+    def _slot_offset(slot: int) -> float:
+        return (slot - (n_slots - 1) / 2) * width
+
+    # Overall pair (hatched, semi-transparent, using each condition's color)
+    for ci, res in enumerate(results):
+        overall_vals = [_nan(res.overall_tpr.get(p)) for p in pathologies]
+        slot = ci  # 0 or 1
+        ax.bar(x + _slot_offset(slot), overall_vals, width,
+               color=res.color, alpha=0.55, hatch="///", edgecolor="grey", linewidth=0.5)
+
+    # Per-group pairs (solid, colored by group)
     for gi, group in enumerate(all_groups):
         for ci, res in enumerate(results):
             grp_df = all_dfs[ci][all_dfs[ci]["group"] == group].set_index("pathology")["tpr"]
-            tprs = [grp_df.get(p, float("nan")) for p in pathologies]
-            slot = gi * n_cond + ci
-            offset = (slot - (n_slots - 2) / 2) * width
-            alpha = 0.9 if ci == 0 else 0.6
-            ax.bar(x + offset, tprs, width,
-                   label=f"{res.name} · {group}" if gi == 0 else "_nolegend_",
-                   color=group_palette[gi], alpha=alpha,
-                   edgecolor="white" if ci > 0 else "none",
-                   linewidth=0.5 if ci > 0 else 0)
+            tprs = [_nan(grp_df.get(p, float("nan"))) for p in pathologies]
+            slot = 2 + gi * 2 + ci
+            hatch = "///" if ci == 1 else ""
+            ax.bar(x + _slot_offset(slot), tprs, width,
+                   color=group_palette[gi], alpha=0.85,
+                   hatch=hatch, edgecolor="white", linewidth=0.4)
 
     ax.set_xticks(x)
     ax.set_xticklabels(pathologies, rotation=40, ha="right", fontsize=8)
     ax.set_ylabel("TPR (sensitivity)")
     ax.set_ylim(0, 1.15)
-    ax.set_title(f"TPR by {attribute.replace('_',' ').title()} — Before vs After Ablation")
-    ax.legend(bbox_to_anchor=(1.01, 1), loc="upper left", fontsize=7, ncol=1)
+    intervention_name = results[-1].name if len(results) > 1 else "intervention"
+    ax.set_title(f"TPR by {attribute.replace('_',' ').title()} — baseline vs {intervention_name}")
+
+    # Legend: condition indicators + group colors
+    res_a, res_b = results[0], results[1]
+    legend_handles = [
+        mpatches.Patch(facecolor="grey", alpha=0.55, hatch="///", edgecolor="grey",
+                       label=f"Overall ({res_a.name})"),
+        mpatches.Patch(facecolor="grey", alpha=0.55, hatch="///", edgecolor="grey",
+                       label=f"Overall ({res_b.name})"),
+        mpatches.Patch(facecolor="white", edgecolor="black", label=f"Group bar: {res_a.name} (solid)"),
+        mpatches.Patch(facecolor="white", edgecolor="black", hatch="///",
+                       label=f"Group bar: {res_b.name} (hatched)"),
+    ]
+    # Color key per group
+    for gi, group in enumerate(all_groups):
+        legend_handles.append(mpatches.Patch(facecolor=group_palette[gi], label=str(group)))
+
+    ax.legend(handles=legend_handles, bbox_to_anchor=(1.01, 1), loc="upper left",
+              fontsize=7, ncol=1)
     fig.tight_layout()
-    fig.savefig(out_dir / f"tpr_by_{attribute}_comparison.png", dpi=150)
+    fig.savefig(out_dir / f"tpr_by_{attribute}_comparison.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
     logger.info("  Saved → tpr_by_%s_comparison.png", attribute)
 
@@ -641,10 +682,90 @@ def _plot_roc_comparison(
     logger.info("  Saved → roc_%s_comparison.png", safe)
 
 
+def _plot_roc_focused_comparison(
+    res_baseline: EvalResult,
+    res_intervention: EvalResult,
+    target_pathology: str,
+    target_attr: str,
+    p_idx: int,
+    attr_arrays: dict[str, np.ndarray],
+    out_dir: Path,
+) -> None:
+    """Single-panel ROC overlay: baseline (solid) vs intervention (dashed).
+
+    Shows the overall ROC curve plus one ROC curve per demographic group of the
+    targeted attribute.  Same colour per group; linestyle distinguishes conditions.
+    A successful intervention will show the per-group curves converging toward
+    the overall curve in the intervention condition.
+    """
+    attr_values = attr_arrays.get(target_attr)
+    if attr_values is None:
+        return
+
+    y_true = res_baseline.y_valid[:, p_idx]
+    if len(np.unique(y_true)) < 2:
+        return
+
+    groups = sorted(np.unique(attr_values[~pd.isna(attr_values)]))
+    group_palette = sns.color_palette("tab10", len(groups))
+    intervention_name = res_intervention.name
+
+    fig, ax = plt.subplots(figsize=(7, 6))
+
+    for res, ls, lw in [
+        (res_baseline,     "-",  2.5),
+        (res_intervention, "--", 2.0),
+    ]:
+        label_suffix = res.name
+        y_score = res.y_scores[:, p_idx]
+
+        # Overall ROC — black, thick
+        fpr_all, tpr_all, _ = roc_curve(y_true, y_score)
+        auc_all = float(roc_auc_score(y_true, y_score))
+        ax.plot(fpr_all, tpr_all,
+                color="black", linewidth=lw, linestyle=ls,
+                label=f"Overall — {label_suffix} (AUC={auc_all:.3f})", zorder=5)
+
+        # Per-group ROC — colour per group, linestyle per condition
+        for color, g in zip(group_palette, groups):
+            mask = attr_values == g
+            y_g, s_g = y_true[mask], y_score[mask]
+            if len(np.unique(y_g)) < 2 or (y_g == 1).sum() < MIN_POSITIVES:
+                continue
+            fpr_g, tpr_g, _ = roc_curve(y_g, s_g)
+            auc_g = float(roc_auc_score(y_g, s_g))
+            ax.plot(fpr_g, tpr_g, color=color, linewidth=1.4, linestyle=ls, alpha=0.85,
+                    label=f"{g} — {label_suffix} (AUC={auc_g:.3f})")
+
+    ax.plot([0, 1], [0, 1], color="lightgrey", linewidth=0.8, linestyle=":")
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1.02)
+    ax.set_xlabel("False Positive Rate", fontsize=10)
+    ax.set_ylabel("True Positive Rate", fontsize=10)
+    ax.set_title(
+        f"ROC Curves — {target_pathology}  ×  {target_attr.replace('_', ' ')}\n"
+        f"Solid = baseline  ·  Dashed = {intervention_name}\n"
+        f"Converging group curves → successful fairness intervention",
+        fontsize=9,
+    )
+    ax.legend(fontsize=7.5, loc="lower right", framealpha=0.9)
+    fig.tight_layout()
+    safe = target_pathology.replace(" ", "_").replace("/", "-")
+    safe_a = target_attr.replace(" ", "_")
+    fig.savefig(out_dir / f"roc_focused_{safe}_{safe_a}.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    logger.info("  Saved → roc_focused_%s_%s.png", safe, safe_a)
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def _safe(s: str) -> str:
     return s.replace(" ", "_").replace("/", "-")
+
+
+def _nan(v: object) -> float:
+    """Convert None (and any non-finite sentinel) to float nan for matplotlib."""
+    return float("nan") if v is None else float(v)
 
 
 def main() -> None:
@@ -790,7 +911,7 @@ def main() -> None:
         Path(args.output_dir) if args.output_dir
         else cfg.output_root / "presentation" / "intervention" / tag
     )
-    (base_out / "comparison").mkdir(parents=True, exist_ok=True)
+    base_out.mkdir(parents=True, exist_ok=True)
     logger.info("Outputs → %s", base_out.resolve())
 
     # Save ablated concept list
@@ -840,16 +961,27 @@ def main() -> None:
         results.append(res_c)
         _save_separate(res_c, pathology_cols, attr_arrays, base_out / "retrained", 0.5)
 
-    # ── Comparison plots ───────────────────────────────────────────────────────
-    comp_dir = base_out / "comparison"
+    # ── Comparison plots (baseline vs each non-baseline condition) ────────────
+    # Each condition's folder contains a vs_baseline/ sub-directory so plots
+    # are self-contained and easy to navigate.
     logger.info("Generating comparison plots…")
-    _plot_auroc_comparison(results, pathology_cols, comp_dir)
-    _plot_tpr_disparity_comparison(results, pathology_cols, comp_dir)
-    for attr in attr_arrays:
-        _plot_tpr_by_group_comparison(results, attr, pathology_cols, comp_dir)
-    _plot_roc_comparison(
-        results, args.pathology, args.attr, target_p_idx, attr_arrays, comp_dir
-    )
+    non_baseline = [r for r in results if r.name != "baseline"]
+    for res in non_baseline:
+        comp_dir = base_out / res.name / "vs_baseline"
+        comp_dir.mkdir(parents=True, exist_ok=True)
+        pair = [res_a, res]
+
+        _plot_auroc_comparison(pair, pathology_cols, comp_dir)
+        _plot_tpr_disparity_comparison(pair, pathology_cols, comp_dir)
+        for attr in attr_arrays:
+            _plot_tpr_by_group_comparison(pair, attr, pathology_cols, comp_dir)
+        _plot_roc_comparison(
+            pair, args.pathology, args.attr, target_p_idx, attr_arrays, comp_dir
+        )
+        _plot_roc_focused_comparison(
+            res_a, res, args.pathology, args.attr, target_p_idx, attr_arrays, comp_dir
+        )
+        logger.info("  Comparison plots → %s/vs_baseline/", res.name)
 
     # ── Summary print ──────────────────────────────────────────────────────────
     logger.info("\n%s", "=" * 60)

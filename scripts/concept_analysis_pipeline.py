@@ -106,6 +106,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="torch device (default: cuda if available, else cpu)",
     )
+    parser.add_argument(
+        "--skip-interventions",
+        action="store_true",
+        default=False,
+        help="Skip the 56-intervention runner at the end (default: interventions run)",
+    )
     return parser.parse_args()
 
 
@@ -479,7 +485,8 @@ def _plot_activation_dist(
         for patch, color in zip(bp["boxes"], palette):
             patch.set_facecolor(color)
             patch.set_alpha(0.7)
-        ax.set_xticklabels(groups, rotation=30, ha="right", fontsize=7)
+        group_labels = [f"{g}\n(n={len(data_groups[gi])})" for gi, g in enumerate(groups)]
+        ax.set_xticklabels(group_labels, rotation=30, ha="right", fontsize=7)
         ax.set_title(f"c{c_idx}\nη²={eta2_val:.3f}", fontsize=8)
         ax.set_ylabel("Activation" if ax_i == 0 else "")
 
@@ -492,6 +499,89 @@ def _plot_activation_dist(
     fig.savefig(out_dir / f"activation_dist_{attr}.png", dpi=150)
     plt.close(fig)
     logger.info("  Saved → activation_dist_%s.png", attr)
+
+
+def _plot_activation_dist_pathology(
+    z: np.ndarray,
+    y_pathology: np.ndarray,
+    pathology_cols: list[str],
+    scores_df: pd.DataFrame,
+    k: int,
+    latent_dim: int,
+    out_dir: Path,
+) -> None:
+    """Box plots of top-5 concepts' activations split by positive vs negative for each pathology.
+
+    Top concepts selected by path_eta2_<safe_path> — shows whether concepts most correlated
+    with this pathology activate differently between positive and negative cases.
+    """
+    n_saved = 0
+    for pathology in pathology_cols:
+        safe_path = _safe(pathology)
+        path_col = f"path_eta2_{safe_path}"
+        if path_col not in scores_df.columns:
+            continue
+
+        p_idx = pathology_cols.index(pathology)
+        y_col = y_pathology[:, p_idx]
+
+        top5 = (
+            scores_df[["concept_idx", path_col]]
+            .dropna(subset=[path_col])
+            .nlargest(TOP_DIST, path_col)
+        )
+        if top5.empty:
+            continue
+
+        pos_mask = y_col == 1
+        neg_mask = y_col == 0
+        n_pos = int(pos_mask.sum())
+        n_neg = int(neg_mask.sum())
+
+        if n_pos < 2 or n_neg < 2:
+            continue
+
+        fig, axes = plt.subplots(1, len(top5), figsize=(4 * len(top5), 4), squeeze=False)
+
+        for ax_i, (_, row) in enumerate(top5.iterrows()):
+            c_idx = int(row["concept_idx"])
+            eta2_val = float(row[path_col])
+            ax = axes[0][ax_i]
+
+            pos_data = z[pos_mask, c_idx]
+            neg_data = z[neg_mask, c_idx]
+
+            bp = ax.boxplot(
+                [neg_data, pos_data],
+                patch_artist=True,
+                showfliers=False,
+                medianprops={"color": "black", "linewidth": 1.5},
+            )
+            colors = ["#4C78A8", "#F58518"]
+            for patch, color in zip(bp["boxes"], colors):
+                patch.set_facecolor(color)
+                patch.set_alpha(0.8)
+
+            ax.set_xticks([1, 2])
+            ax.set_xticklabels(
+                [f"Negative\n(n={n_neg})", f"Positive\n(n={n_pos})"],
+                fontsize=7,
+            )
+            ax.set_title(f"c{c_idx}\nη²={eta2_val:.3f}", fontsize=8)
+            ax.set_ylabel("Activation" if ax_i == 0 else "")
+
+        fig.suptitle(
+            f"Top-{TOP_DIST} concept activations: {pathology} (pos vs neg)\n"
+            f"SAE: k={k}, latent_dim={latent_dim}",
+            fontsize=9,
+        )
+        fig.tight_layout()
+        fig.savefig(out_dir / f"activation_dist_path_{safe_path}.png", dpi=150)
+        plt.close(fig)
+        logger.info("  Saved → activation_dist_path_%s.png", safe_path)
+        n_saved += 1
+
+    return n_saved
 
 
 # ── Grid-level plots ───────────────────────────────────────────────────────────
@@ -680,6 +770,45 @@ def _plot_demo_vs_path_scatter(grid_results: list[dict], grid_out: Path) -> None
     logger.info("Saved → scatter_demo_vs_path.png")
 
 
+# ── Intervention runner ────────────────────────────────────────────────────────
+
+def _run_all_interventions(cfg, base_out: Path, args: argparse.Namespace) -> None:
+    """Run fairness_intervention.py for every (attr, pathology) pair in best_sae_per_pair.csv."""
+    import subprocess
+
+    grid_out = base_out / "grid"
+    best_csv = grid_out / "best_sae_per_pair.csv"
+    if not best_csv.exists():
+        logger.warning("best_sae_per_pair.csv not found at %s; skipping interventions.", best_csv)
+        return
+
+    best_df = pd.read_csv(best_csv)
+    pairs = list(best_df[["attr", "pathology"]].drop_duplicates().itertuples(index=False))
+    n_pairs = len(pairs)
+    logger.info("Running interventions for all %d (attr, pathology) pairs…", n_pairs)
+
+    intervention_script = Path(__file__).parent / "fairness_intervention.py"
+    interventions_out = base_out.parent / "interventions"
+
+    for i, row in enumerate(pairs):
+        attr = row.attr
+        pathology = row.pathology
+        logger.info("  [%d/%d] %s × %s", i + 1, n_pairs, attr, pathology)
+        cmd = [
+            sys.executable, str(intervention_script),
+            "--config", args.config,
+            "--attr", attr,
+            "--pathology", pathology,
+            "--sae-dir", str(base_out),
+            "--output-dir", str(interventions_out),
+            "--lr-mode", "both",
+            "--threshold", "0.02",
+        ]
+        subprocess.run(cmd, check=False)
+
+    logger.info("All interventions complete.")
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -719,7 +848,11 @@ def main() -> None:
     meta_val = metadata[valid_mask].reset_index(drop=True)
     age_group_val = age_group[valid_mask]
 
-    # Build attribute arrays for the validation set (used for η² analysis)
+    y_train = y_pathology[train_mask]
+    meta_train = metadata[train_mask].reset_index(drop=True)
+    age_group_train = age_group[train_mask]
+
+    # Build attribute arrays for the validation set (kept for reference)
     attr_arrays: dict[str, np.ndarray] = {
         "age_group": _clean_attr(age_group_val),
     }
@@ -729,7 +862,17 @@ def main() -> None:
         else:
             logger.warning("Attribute '%s' not found in metadata; skipping.", attr)
 
-    attr_names = list(attr_arrays.keys())
+    # Build attribute arrays for the training set (used for η² analysis)
+    attr_arrays_train: dict[str, np.ndarray] = {
+        "age_group": _clean_attr(age_group_train),
+    }
+    for attr in ["sex", "race", "insurance_type"]:
+        if attr in meta_train.columns:
+            attr_arrays_train[attr] = _clean_attr(meta_train[attr].to_numpy())
+        else:
+            logger.warning("Attribute '%s' not found in train metadata; skipping.", attr)
+
+    attr_names = list(attr_arrays_train.keys())
     safe_paths = [_safe(p) for p in pathology_cols]
 
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -769,13 +912,14 @@ def main() -> None:
         logger.info("  Saved sae_checkpoint.pt")
 
         z_val = encode_all(model, x_valid, device)
+        z_train_enc = encode_all(model, x_train, device)
 
         logger.info(
-            "  Computing η² for %d concepts × %d targets…",
+            "  Computing η² for %d concepts × %d targets (on training set)…",
             latent_dim,
-            len(pathology_cols) + len(attr_arrays),
+            len(pathology_cols) + len(attr_arrays_train),
         )
-        scores_df = compute_concept_scores(z_val, y_val, pathology_cols, attr_arrays)
+        scores_df = compute_concept_scores(z_train_enc, y_train, pathology_cols, attr_arrays_train)
         scores_df.to_csv(run_out / "concept_scores.csv", index=False)
         logger.info("  Saved concept_scores.csv (%d rows, %d cols)", len(scores_df), len(scores_df.columns))
 
@@ -792,7 +936,12 @@ def main() -> None:
 
         # ── Activation distribution plots ─────────────────────────────────────
         for attr in attr_names:
-            _plot_activation_dist(z_val, scores_df, attr, attr_arrays[attr], k, latent_dim, run_out)
+            _plot_activation_dist(z_train_enc, scores_df, attr, attr_arrays_train[attr], k, latent_dim, run_out)
+
+        n_path_plots = _plot_activation_dist_pathology(
+            z_train_enc, y_train, pathology_cols, scores_df, k, latent_dim, run_out
+        )
+        logger.info("  Saved %d pathology activation distribution plots", n_path_plots)
 
         # ── Collect grid summary stats ────────────────────────────────────────
         result: dict = {"k": k, "latent_dim": latent_dim}
@@ -865,6 +1014,9 @@ def main() -> None:
     _plot_demo_vs_path_scatter(grid_results, grid_out)
 
     logger.info("Done. All outputs in %s", base_out.resolve())
+
+    if not args.skip_interventions:
+        _run_all_interventions(cfg, base_out, args)
 
 
 if __name__ == "__main__":

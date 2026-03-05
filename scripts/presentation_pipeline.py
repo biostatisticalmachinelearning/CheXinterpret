@@ -300,10 +300,13 @@ def _plot_auroc(auroc_df: pd.DataFrame, output_dir: Path) -> None:
     )
     ax.set_xlim(0, 1.05)
     ax.legend(fontsize=8)
-    for bar, val in zip(bars, df["auroc"]):
+    for bar, row in zip(bars, df.itertuples()):
+        val = row.auroc
+        n_pos = row.n_positive_valid
+        n_tot = row.n_valid
         ax.text(
             min(val + 0.01, 1.0), bar.get_y() + bar.get_height() / 2,
-            f"{val:.3f}", va="center", fontsize=8,
+            f"{val:.3f}  (pos={n_pos}, n={n_tot})", va="center", fontsize=8,
         )
     fig.tight_layout()
     path = output_dir / "auroc_per_pathology.png"
@@ -368,6 +371,21 @@ def _plot_tpr_by_group(
     width = min(0.8 / n_slots, 0.22)
     palette = sns.color_palette("tab10", n_groups)
 
+    # Compute average n per group for legend labels
+    n_val_per_group = (
+        tpr_df[tpr_df["attribute"] == attribute]
+        .groupby("group")["n_total"]
+        .mean()
+        .astype(int)
+    )
+
+    # Build n_positive lookup: (pathology, group) -> n_positive
+    n_pos_lookup = (
+        tpr_df[tpr_df["attribute"] == attribute]
+        .set_index(["pathology", "group"])["n_positive"]
+        .to_dict()
+    )
+
     # Overall bar (grey, hatched) — leftmost in each cluster
     overall_vals = [overall_tpr.get(p) for p in pathologies]
     overall_offset = (-(n_slots - 1) / 2) * width
@@ -378,18 +396,35 @@ def _plot_tpr_by_group(
 
     # Per-group bars
     for i, group in enumerate(groups):
-        grp = df[df["group"] == group].set_index("pathology")["tpr"]
-        tprs = [grp.get(p, float("nan")) for p in pathologies]
+        grp_rows = df[df["group"] == group].set_index("pathology")
+        tprs = [grp_rows["tpr"].get(p, float("nan")) for p in pathologies]
         offset = (i + 1 - (n_slots - 1) / 2) * width
-        ax.bar(x + offset, tprs, width, label=str(group), color=palette[i], alpha=0.85)
+        avg_n = n_val_per_group.get(group, "?")
+        ax.bar(
+            x + offset, tprs, width,
+            label=f"{group} (avg n={avg_n})",
+            color=palette[i], alpha=0.85,
+        )
+        # Annotate n_positive on top of each bar
+        for xi, p in enumerate(pathologies):
+            tpr_val = grp_rows["tpr"].get(p, None)
+            if tpr_val is None or not np.isfinite(float(tpr_val)):
+                continue
+            n_pos = n_pos_lookup.get((p, group), None)
+            if n_pos is not None:
+                x_pos = xi + offset
+                ax.text(
+                    x_pos, float(tpr_val) + 0.02,
+                    f"n+={n_pos}", fontsize=6, ha="center", va="bottom", rotation=90,
+                )
 
     ax.set_xticks(x)
     ax.set_xticklabels(pathologies, rotation=40, ha="right", fontsize=8)
     ax.set_ylabel("TPR (sensitivity)")
-    ax.set_ylim(0, 1.1)
+    ax.set_ylim(0, 1.25)
     ax.set_title(f"Sensitivity by {attribute.replace('_', ' ').title()} per Pathology")
     ax.legend(
-        title=attribute.replace("_", " ").title(),
+        title=f"{attribute.replace('_', ' ').title()} (avg n in validation)",
         bbox_to_anchor=(1.01, 1),
         loc="upper left",
         fontsize=8,
@@ -434,10 +469,12 @@ def _plot_roc_for_pathology(
         ax = axes[ax_idx // n_cols][ax_idx % n_cols]
 
         # Overall ROC
+        n_total = len(y_valid)
+        n_pos = int((y_valid == 1).sum())
         ax.plot(
             overall_fpr, overall_tpr,
             color="black", linewidth=2, linestyle="--",
-            label=f"Overall (AUC={overall_auroc:.3f})",
+            label=f"Overall (AUC={overall_auroc:.3f}, n={n_total:,}, pos={n_pos:,})",
             zorder=5,
         )
 
@@ -452,8 +489,10 @@ def _plot_roc_for_pathology(
                 continue
             fpr_g, tpr_g, _ = roc_curve(y_g, s_g)
             auc_g = float(roc_auc_score(y_g, s_g))
+            n_g = int(mask.sum())
+            n_pos_g = int((y_g == 1).sum())
             ax.plot(fpr_g, tpr_g, color=color, linewidth=1.5,
-                    label=f"{group_val} (AUC={auc_g:.3f})")
+                    label=f"{group_val} (AUC={auc_g:.3f}, n={n_g:,}, pos={n_pos_g:,})")
 
         ax.plot([0, 1], [0, 1], color="lightgrey", linewidth=0.8, linestyle=":")
         ax.set_xlim(0, 1)

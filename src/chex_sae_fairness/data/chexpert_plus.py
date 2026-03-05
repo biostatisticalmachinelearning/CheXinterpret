@@ -99,6 +99,12 @@ def build_manifest(cfg: ExperimentConfig) -> ManifestBuildResult:
     if len(frame) == 0:
         _raise_zero_rows_error(image_root)
 
+    if cfg.data.min_valid_fraction is not None:
+        frame = _ensure_min_valid_fraction(
+            frame, cfg.schema.split_col, cfg.data.min_valid_fraction,
+            cfg.data.validation_split_name, seed=cfg.seed,
+        )
+
     if cfg.data.max_rows_per_split is not None:
         limit = cfg.data.max_rows_per_split
         frame = (
@@ -114,6 +120,52 @@ def build_manifest(cfg: ExperimentConfig) -> ManifestBuildResult:
         )
 
     return ManifestBuildResult(manifest=frame.loc[:, output_cols], dropped_rows=dropped_rows)
+
+
+def _ensure_min_valid_fraction(
+    frame: pd.DataFrame,
+    split_col: str,
+    min_fraction: float,
+    valid_name: str,
+    seed: int,
+) -> pd.DataFrame:
+    """Promote a random sample of training rows to the validation split if needed.
+
+    Guarantees that at least `min_fraction` of the total manifest rows are assigned
+    to the validation split.  Training rows are chosen deterministically using `seed`.
+    Has no effect if the existing validation fraction already meets the target.
+    """
+    n_total = len(frame)
+    n_valid_current = int((frame[split_col] == valid_name).sum())
+    target_n_valid = int(np.ceil(n_total * min_fraction))
+
+    if n_valid_current >= target_n_valid:
+        return frame
+
+    n_to_move = target_n_valid - n_valid_current
+    train_mask = frame[split_col] == "train"
+    train_indices = frame.index[train_mask].to_numpy()
+
+    if len(train_indices) == 0:
+        return frame
+
+    rng = np.random.default_rng(seed)
+    move_indices = rng.choice(
+        train_indices,
+        size=min(n_to_move, len(train_indices)),
+        replace=False,
+    )
+    frame = frame.copy()
+    frame.loc[move_indices, split_col] = valid_name
+
+    n_valid_new = int((frame[split_col] == valid_name).sum())
+    logger.info(
+        "min_valid_fraction=%.2f: promoted %d training rows to '%s' "
+        "(valid: %d → %d, total: %d).",
+        min_fraction, len(move_indices), valid_name,
+        n_valid_current, n_valid_new, n_total,
+    )
+    return frame
 
 
 def save_manifest(manifest: pd.DataFrame, output_path: str | Path) -> None:
