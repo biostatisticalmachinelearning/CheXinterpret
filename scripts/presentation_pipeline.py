@@ -90,11 +90,8 @@ def load_bundle(feature_path: Path) -> dict[str, np.ndarray]:
 
 def _clean_attr(values: np.ndarray) -> np.ndarray:
     """Replace 'nan', 'None', '' with np.nan for consistent missing-value handling."""
-    out = np.where(
-        np.isin(values.astype(str), {"nan", "None", "none", ""}),
-        np.nan,
-        values.astype(str),
-    )
+    out = values.astype(object)
+    out[np.isin(values.astype(str), {"nan", "None", "none", ""})] = np.nan
     return out
 
 
