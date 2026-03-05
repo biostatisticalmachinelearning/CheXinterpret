@@ -760,6 +760,14 @@ def main() -> None:
             device=device,
         )
 
+        # Save checkpoint so the intervention pipeline can reload this SAE
+        torch.save(
+            {"state_dict": model.state_dict(), "input_dim": int(x_train.shape[1]),
+             "latent_dim": int(latent_dim), "k": int(k)},
+            run_out / "sae_checkpoint.pt",
+        )
+        logger.info("  Saved sae_checkpoint.pt")
+
         z_val = encode_all(model, x_valid, device)
 
         logger.info(
