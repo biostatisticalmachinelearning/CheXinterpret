@@ -842,27 +842,27 @@ def main() -> None:
 
     logger.info("Split sizes — train: %d  valid: %d", train_mask.sum(), valid_mask.sum())
 
+    # Validation split is NEVER touched here — reserved for final evaluation only.
     x_train = x[train_mask]
-    x_valid = x[valid_mask]
-    y_val = y_pathology[valid_mask]
-    meta_val = metadata[valid_mask].reset_index(drop=True)
-    age_group_val = age_group[valid_mask]
-
     y_train = y_pathology[train_mask]
     meta_train = metadata[train_mask].reset_index(drop=True)
     age_group_train = age_group[train_mask]
 
-    # Build attribute arrays for the validation set (kept for reference)
-    attr_arrays: dict[str, np.ndarray] = {
-        "age_group": _clean_attr(age_group_val),
-    }
-    for attr in ["sex", "race", "insurance_type"]:
-        if attr in meta_val.columns:
-            attr_arrays[attr] = _clean_attr(meta_val[attr].to_numpy())
-        else:
-            logger.warning("Attribute '%s' not found in metadata; skipping.", attr)
+    # Internal SAE validation set: a 10% hold-out from training data only.
+    # This keeps the true validation split completely uncontaminated.
+    rng = np.random.default_rng(cfg.seed)
+    n_train = len(x_train)
+    n_sae_val = max(1, int(n_train * 0.10))
+    sae_val_idx = rng.choice(n_train, size=n_sae_val, replace=False)
+    sae_train_idx = np.setdiff1d(np.arange(n_train), sae_val_idx)
+    x_sae_train = x_train[sae_train_idx]
+    x_sae_val   = x_train[sae_val_idx]
+    logger.info(
+        "Internal SAE split (from train only): sae_train=%d  sae_val=%d",
+        len(x_sae_train), len(x_sae_val),
+    )
 
-    # Build attribute arrays for the training set (used for η² analysis)
+    # Attribute arrays for η² and activation-distribution plots (training set only).
     attr_arrays_train: dict[str, np.ndarray] = {
         "age_group": _clean_attr(age_group_train),
     }
@@ -895,8 +895,8 @@ def main() -> None:
         logger.info("─── SAE %s ───", run_label)
 
         model = train_topk_sae(
-            x_train=x_train,
-            x_valid=x_valid,
+            x_train=x_sae_train,
+            x_valid=x_sae_val,
             latent_dim=latent_dim,
             k=k,
             epochs=epochs,
@@ -911,7 +911,6 @@ def main() -> None:
         )
         logger.info("  Saved sae_checkpoint.pt")
 
-        z_val = encode_all(model, x_valid, device)
         z_train_enc = encode_all(model, x_train, device)
 
         logger.info(
