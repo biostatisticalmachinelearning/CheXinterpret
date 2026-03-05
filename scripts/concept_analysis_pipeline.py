@@ -923,17 +923,23 @@ def _run_all_interventions(cfg, base_out: Path, args: argparse.Namespace) -> Non
         pathology = row.pathology
         logger.info("  [%d/%d] %s × %s", i + 1, n_pairs, attr, pathology)
         cmd = [
-            sys.executable, str(intervention_script),
-            "--config", args.config,
+            sys.executable, str(intervention_script.resolve()),
+            "--config", str(Path(args.config).resolve()),
             "--attr", attr,
             "--pathology", pathology,
-            "--sae-dir", str(base_out),
-            "--output-dir", str(interventions_out),
+            "--sae-dir", str(base_out.resolve()),
+            "--output-dir", str(interventions_out.resolve()),
             "--specificity-mode", spec_mode,
             "--lr-mode", "both",
             "--threshold", "0.02",
         ]
-        subprocess.run(cmd, check=False)
+        result = subprocess.run(cmd, check=False)
+        if result.returncode != 0:
+            logger.warning(
+                "  [%d/%d] FAILED (exit %d): %s × %s — "
+                "check threshold or concept_scores.csv for this pair.",
+                i + 1, n_pairs, result.returncode, attr, pathology,
+            )
 
     logger.info("All interventions complete.")
     _generate_intervention_summary_roc(interventions_out, pairs, "0.02")

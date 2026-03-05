@@ -233,7 +233,8 @@ python scripts/fairness_intervention.py \
 
 1. Loads the feature bundle and the best SAE checkpoint for the target
    (attr, pathology) pair (identified from `best_sae_per_pair.csv`).
-2. Ranks all SAE latents by their **specificity score** for the target pair.
+2. Ranks all SAE latents by their **specificity score** for the target pair
+   (computed using whichever mode was used in Stage 2 — see section 4.12).
 3. **Mean-ablates** the top-specificity concepts: replaces their activations
    with the training-set mean for every split (train + validation).
 4. Evaluates three conditions on the **validation split**:
@@ -264,6 +265,20 @@ python scripts/fairness_intervention.py \
 | | `tpr_by_<attr>_comparison.png` | Paired bars: baseline vs ablated/retrained per group |
 | | `roc_curves/roc_<pathology>_comparison.png` | 4-quadrant ROC comparison (all attrs) |
 | | `roc_curves/roc_<pathology>_focused.png` | Zoomed focused ROC for the target pathology |
+
+**Threshold warnings.** If the `--threshold` value is too high (no concepts
+have a specificity score exceeding it), the script logs a warning with the
+maximum observed specificity and exits with code 1:
+
+```
+WARNING  | No concepts exceed the threshold. Try a lower --threshold value.
+         | Max pair specificity in this SAE: 0.0142
+```
+
+When Stage 3 is invoked automatically by Stage 2's 56-pair loop, a per-pair
+exit code of 1 is tolerated — the runner continues to the next pair — but the
+warning appears in the parent process's log.  If you see many such warnings,
+lower `--threshold` (the automated loop uses `0.02` by default; try `0.01`).
 
 ---
 
@@ -458,6 +473,196 @@ Supplement baseline suite includes:
 - `group_threshold`: post-hoc per-group thresholding
 - `equalized_odds`: approximate equalized-odds threshold tuning
 - `adversarial_debiasing`: bottleneck predictor with adversarial age-group classifier
+
+## 4.12 Concept Specificity Metrics
+
+The core question in Stage 2 is: *which SAE latents encode demographic
+information without encoding pathology?*  Formally, the ideal concept `c` to
+ablate for a (demographic attribute `A`, pathology `P`) pair satisfies:
+
+> **c encodes A** (activates differently across demographic groups), and
+> **c ⊥ P | A** (provides no additional information about the diagnosis
+> beyond what group membership already implies).
+
+Two metrics are provided to approximate this, selectable via
+`sae.specificity_mode` in the config or `--specificity-mode` on the CLI.
+
+---
+
+### Mode 1: `eta2` (default)
+
+```
+demo_score(c, A)    = η²(c, A)       — fraction of concept variance explained by A
+path_score(c, P)    = η²(c, P)       — fraction of concept variance explained by P
+specificity(c, A, P) = demo_η²(c, A) − path_η²(c, P)
+```
+
+η² is the classical one-way ANOVA effect size: `SS_between / SS_total`.  For a
+binary grouping variable it equals the squared point-biserial correlation r².
+
+**Strengths**
+
+- Fast: O(n) per (concept, target) pair.
+- Intuitive: fraction of variance explained, bounded in [0, 1].
+- Works well when classes are reasonably balanced and activations are
+  approximately continuous.
+
+**Known biases**
+
+1. *Class imbalance.*  For a binary target with prevalence p, SS_between is
+   proportional to n·p(1−p)·(Δμ)².  A pathology with 2% prevalence
+   (p = 0.02) can contribute at most 0.02 × 0.98 ≈ 2% of its variance as
+   SS_between, even if the concept is a perfect discriminator.  Multi-class
+   demographic attributes (e.g. 8 balanced age bins) face no such ceiling.
+   This means `path_η²` is *structurally* lower than `demo_η²` for
+   multi-class demographics, and the specificity `demo_η² − path_η²` is
+   inflated for those pairs regardless of the concept's true nature.
+
+2. *Binary sex attribute.*  Sex is also a binary variable, so `demo_η²` for
+   sex suffers the same suppression as `path_η²`.  Concept specificity for
+   (sex, P) pairs is therefore approximately unbiased between the two terms —
+   but both are smaller in absolute value than for multi-class demographics,
+   making sex pairs harder to distinguish from noise.
+
+3. *Zero-inflation.*  TopK SAE activations are ~95–98% zero for a given
+   concept.  All zeros are pulled toward the grand mean, inflating SS_total
+   without adding to SS_between.  This depresses η² across the board but
+   more severely for concepts that fire rarely (i.e. those that encode rare
+   pathologies).
+
+4. *Confounded path score.*  `path_η²(c, P)` is computed unconditionally.
+   If age is strongly correlated with Cardiomegaly in the dataset, a concept
+   that encodes age (not Cardiomegaly) will still show elevated `path_η²`
+   simply because its age-encoding causes it to fire more often for older
+   patients, who happen to have higher Cardiomegaly prevalence.  The
+   specificity score therefore *underestimates* how demographic the concept
+   truly is in highly correlated (A, P) pairs.
+
+**When to use `eta2`**
+
+Use it as a fast baseline or when the demographic attributes are multi-class
+and roughly balanced (age_group, race, insurance_type) and the pathologies of
+interest are relatively common (>5% prevalence).  The bias in the binary/rare
+case is tolerable for a first-pass sweep; the concept rankings are still
+informative.  It is also the right choice when you want the grid sweep of 20
+SAEs to finish quickly — AUC computation in `conditional_auc` mode is
+meaningfully slower.
+
+---
+
+### Mode 2: `conditional_auc`
+
+```
+demo_score(c, A)     = macro OVR AUC(c → A)
+                       — how well c rank-orders patients by demographic group
+path_score(c, A, P)  = mean_g[ AUC(c → P | A = g) ]
+                       — mean AUC of c predicting P within each group g of A
+specificity(c, A, P) = demo_auc(c, A) − conditional_path_auc(c, A, P)
+```
+
+**Demo score.**  For binary attributes (sex), this is the standard binary
+AUC.  For multi-class attributes (age_group, race, insurance_type), it is the
+macro one-vs-rest AUC: for each group g, compute AUC(c → {patient in g})
+and average across all g.
+
+**Conditional path score.**  The key innovation.  Rather than computing
+`AUC(c → P)` over the whole dataset, we stratify by demographic group and
+compute `AUC(c → P | A = g)` separately within each stratum, then average.
+Only strata with at least 5 positive cases contribute to the mean.
+
+**Why this fixes the confounding problem.**  Suppose age is strongly correlated
+with Cardiomegaly.  A concept that fires for age (not Cardiomegaly) will show
+elevated `AUC(c → Cardiomegaly)` in `eta2` mode — because older patients,
+who trigger the concept, also disproportionately have Cardiomegaly.  But
+within each age stratum, that concept provides *no useful ranking* of patients
+by Cardiomegaly status (it fires indiscriminately for all old patients,
+regardless of whether they have the disease).  The conditional path AUC
+therefore correctly stays near 0.5, and the concept receives a high
+specificity score.
+
+Conversely, a concept that directly encodes Cardiomegaly (e.g. one that
+responds to enlarged cardiac silhouette regardless of patient age) will rank
+Cardiomegaly-positive patients above Cardiomegaly-negative patients *even
+within* a single age stratum.  Its conditional path AUC exceeds 0.5, and its
+specificity score is appropriately penalised.
+
+**Why AUC instead of η².**  AUC is the probability that a randomly chosen
+positive outranks a randomly chosen negative (Wilcoxon-Mann-Whitney
+statistic).  It is:
+
+- *Invariant to class imbalance*: 2% prevalence and 50% prevalence give
+  comparably calibrated AUC values.
+- *Rank-based*: unaffected by the heavy zero-inflation of TopK activations —
+  all zeros are tied at the bottom of the ranking and treated consistently.
+- *Comparable across binary and multi-class targets*: both demo and path
+  terms live in [0.5, 1], so the subtraction is meaningful and symmetric.
+
+**Known limitations**
+
+1. *Small strata.*  Stratifying by group can leave very few positives per
+   stratum for rare pathologies (e.g. Pneumonia with 0.2% prevalence in a
+   stratum of 500 patients → ~1 positive).  Strata with fewer than 5
+   positives are excluded; if all strata are excluded the value is `NaN` and
+   that pair is skipped.  This affects mainly the rarest pathologies and the
+   finest-grained demographic attributes.
+
+2. *Computation time.*  With 20 SAEs × n_concepts × 56 (attr, P) pairs ×
+   stratified AUC per concept, the scoring step is roughly 5–10× slower than
+   `eta2` mode.
+
+3. *Linear confounding only.*  The conditional AUC removes the *rank-based*
+   association between demographics and pathology.  Nonlinear confounding
+   (e.g. a concept encoding a complex interaction of age × comorbidity) is
+   not fully removed.  For most practical purposes this is adequate.
+
+**When to use `conditional_auc`**
+
+Use it when you have reason to believe that the targeted demographic attribute
+is epidemiologically correlated with the target pathology (age and Cardiomegaly,
+race and Pleural Effusion, insurance type and Support Devices, etc.) and you
+want to be confident that the selected concepts are genuinely encoding the
+demographic variable rather than being proxies for pathology.  This is the
+more defensible choice for any publication-quality analysis, and should be
+preferred when the full pipeline is being run to produce final intervention
+results.
+
+---
+
+### Choosing between modes: decision guide
+
+| Situation | Recommended mode |
+|---|---|
+| Quick exploration / first SAE grid sweep | `eta2` |
+| Pathology prevalence < 5% | `conditional_auc` |
+| Demographic attribute is binary (sex) | `conditional_auc` (η² is equally biased for both terms, but AUC is better calibrated) |
+| Demographic and pathology known to be correlated | `conditional_auc` |
+| Comparing two runs head-to-head | Run both; compare intervention AUROC/TPR outcomes |
+| Publication-quality results | `conditional_auc` |
+
+### Running both modes side by side
+
+Both runs coexist in the same output tree:
+
+```
+outputs/default/presentation/
+  sae-eval/                       ← eta2 mode
+  sae-eval-conditional-auc/       ← conditional_auc mode
+  interventions/                  ← interventions from eta2 run
+  interventions-conditional-auc/  ← interventions from conditional_auc run
+```
+
+```bash
+# eta2 (default)
+python scripts/concept_analysis_pipeline.py --config configs/default.yaml
+
+# conditional_auc
+python scripts/concept_analysis_pipeline.py --config configs/default.yaml \
+    --specificity-mode conditional_auc
+
+# Or set in config YAML:
+#   sae:
+#     specificity_mode: "conditional_auc"
+```
 
 ## 5) Output Artifacts
 
