@@ -3,20 +3,34 @@
 
 Trains a grid of Top-k Sparse Autoencoders (k × latent_dim) on CheXagent embeddings,
 then measures how strongly each SAE latent (concept) correlates with demographic
-variables vs. pathology labels, using Eta-squared (η²) throughout.
+variables vs. pathology labels using Eta-squared (η²) throughout.
+
+Specificity is computed **per (demographic, pathology) pair**:
+    spec(concept, demo_attr, pathology) = demo_η²_attr(concept) − path_η²_pathology(concept)
+
+A concept with high specificity for pair (sex, Cardiomegaly) is strongly correlated
+with sex AND weakly correlated with Cardiomegaly — the ideal fairness confound.
 
 Grid: k ∈ {8, 16, 32, 64}  ×  latent_dim ∈ {256, 512, 1024, 2048, 4096}  → 20 SAEs
 
-Outputs (written to <output_root>/presentation/sae-eval/):
-  Per-SAE sub-directories (k<k>_d<dim>/):
-    concept_scores.csv          — η² columns for every concept × every target
-    top10_per_demo_<attr>.png   — top-10 concepts for each demographic attribute
-    top10_per_path_<path>.png   — top-10 concepts for each pathology
-    activation_dist_<attr>.png  — activation distributions for top-5 demo concepts
+Output structure (written to <output_root>/presentation/sae-eval/):
 
-  Grid-level plots (grid/):
-    specificity_heatmap.png     — mean specificity across k × latent_dim grid
-    scatter_demo_vs_path.png    — demo_η² vs path_η² scatter for all SAEs
+  Per-SAE directories  k<k>_d<dim>/
+  ├── concept_scores.csv         full η² + per-pair specificity table
+  ├── pair_overview.png          (attr × path) heatmap: max single-concept spec per pair
+  ├── per_pair/
+  │   └── top10_<attr>_<path>.png  top-10 concepts for each (demo, path) pair
+  │                                3-bar clusters: demo_η², path_η², pair_specificity
+  └── activation_dist_<attr>.png  box plots: top-5 demo concepts by group
+
+  Grid directory  grid/
+  ├── grid_summary.csv             one row per SAE, mean spec per pair
+  ├── best_sae_per_pair.csv        best (k, latent_dim) for every (attr, path) pair
+  ├── best_sae_heatmap.png         (attr × path) heatmap: name of best architecture
+  ├── specificity_heatmap.png      k×dim grid coloured by mean pair-specificity
+  ├── scatter_demo_vs_path.png     mean demo_η² vs mean path_η² scatter per SAE
+  └── pair_heatmaps/
+      └── spec_<attr>_<path>.png   k×dim grid heatmap for each (attr, path) pair
 
 Usage:
   python scripts/concept_analysis_pipeline.py --config configs/test.yaml
@@ -55,13 +69,17 @@ SAE_BATCH_SIZE: int = 512
 SAE_LR: float = 1e-3
 SAE_WEIGHT_DECAY: float = 1e-6
 
-# Sensitive attributes to analyse
-SENSITIVE_ATTRS: list[str] = ["sex", "age_group", "race", "insurance_type"]
-
-# Top-N concepts shown in per-SAE plots
+# Top-N concepts shown in per-pair plots
 TOP_N: int = 10
 # Top concepts shown in activation distribution plots
 TOP_DIST: int = 5
+
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+
+def _safe(s: str) -> str:
+    """Convert a label to a safe filename / column-name fragment."""
+    return s.replace(" ", "_").replace("/", "-")
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
@@ -110,12 +128,13 @@ def _clean_attr(values: np.ndarray) -> np.ndarray:
     return out
 
 
-# ── SAE training ───────────────────────────────────────────────────────────────
+# ── SAE ────────────────────────────────────────────────────────────────────────
 
 class TopKSAE(torch.nn.Module):
     def __init__(self, input_dim: int, latent_dim: int, k: int) -> None:
         super().__init__()
         self.k = k
+        self.latent_dim = latent_dim
         self.encoder = torch.nn.Linear(input_dim, latent_dim)
         self.decoder = torch.nn.Linear(latent_dim, input_dim)
         self.activation = torch.nn.ReLU()
@@ -133,9 +152,12 @@ class TopKSAE(torch.nn.Module):
         mask.scatter_(dim=-1, index=indices, value=1.0)
         return z * mask
 
+    def decode(self, z: torch.Tensor) -> torch.Tensor:
+        return self.decoder(z)
+
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         z = self.encode(x)
-        return self.decoder(z), z
+        return self.decode(z), z
 
 
 def train_topk_sae(
@@ -146,36 +168,37 @@ def train_topk_sae(
     epochs: int,
     device: str,
 ) -> TopKSAE:
-    input_dim = x_train.shape[1]
-    model = TopKSAE(input_dim, latent_dim, k).to(device)
+    model = TopKSAE(x_train.shape[1], latent_dim, k).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=SAE_LR, weight_decay=SAE_WEIGHT_DECAY)
 
-    train_tensor = torch.tensor(x_train, dtype=torch.float32)
+    train_loader = DataLoader(
+        TensorDataset(torch.tensor(x_train, dtype=torch.float32)),
+        batch_size=SAE_BATCH_SIZE,
+        shuffle=True,
+    )
     valid_tensor = torch.tensor(x_valid, dtype=torch.float32)
-    train_loader = DataLoader(TensorDataset(train_tensor), batch_size=SAE_BATCH_SIZE, shuffle=True)
 
-    best_valid_loss = float("inf")
+    best_loss = float("inf")
     best_state: dict | None = None
 
-    for epoch in range(epochs):
+    for _epoch in range(epochs):
         model.train()
         for (batch,) in train_loader:
             batch = batch.to(device)
-            x_hat, z = model(batch)
+            x_hat, _ = model(batch)
             loss = torch.mean((batch - x_hat) ** 2)
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
 
-        # Validation loss
         model.eval()
         with torch.no_grad():
             v = valid_tensor.to(device)
             x_hat_v, _ = model(v)
-            valid_loss = float(torch.mean((v - x_hat_v) ** 2).item())
+            vloss = float(torch.mean((v - x_hat_v) ** 2).item())
 
-        if valid_loss < best_valid_loss:
-            best_valid_loss = valid_loss
+        if vloss < best_loss:
+            best_loss = vloss
             best_state = {k_: v_.cpu().clone() for k_, v_ in model.state_dict().items()}
 
     if best_state is not None:
@@ -186,19 +209,21 @@ def train_topk_sae(
 @torch.no_grad()
 def encode_all(model: TopKSAE, x: np.ndarray, device: str) -> np.ndarray:
     model.eval().to(device)
-    tensor = torch.tensor(x, dtype=torch.float32)
-    loader = DataLoader(TensorDataset(tensor), batch_size=SAE_BATCH_SIZE * 4, shuffle=False)
+    loader = DataLoader(
+        TensorDataset(torch.tensor(x, dtype=torch.float32)),
+        batch_size=SAE_BATCH_SIZE * 4,
+        shuffle=False,
+    )
     parts: list[np.ndarray] = []
     for (batch,) in loader:
-        z = model.encode(batch.to(device))
-        parts.append(z.cpu().numpy().astype(np.float32))
+        parts.append(model.encode(batch.to(device)).cpu().numpy().astype(np.float32))
     return np.concatenate(parts, axis=0)
 
 
 # ── Eta-squared (η²) ──────────────────────────────────────────────────────────
 
 def eta_squared_binary(z_col: np.ndarray, binary_target: np.ndarray) -> float:
-    """η² = SS_between / SS_total for a binary group variable.
+    """η² = SS_between / SS_total for a binary grouping variable.
 
     Equivalent to r² (squared point-biserial correlation).
     """
@@ -208,34 +233,35 @@ def eta_squared_binary(z_col: np.ndarray, binary_target: np.ndarray) -> float:
     z = z_col[valid]
     y = binary_target[valid].astype(float)
     grand_mean = z.mean()
-    ss_total = np.sum((z - grand_mean) ** 2)
+    ss_total = float(np.sum((z - grand_mean) ** 2))
     if ss_total < 1e-12:
         return 0.0
-    groups = np.unique(y)
-    ss_between = sum(
+    ss_between = float(sum(
         np.sum(y == g) * (z[y == g].mean() - grand_mean) ** 2
-        for g in groups
-    )
+        for g in np.unique(y)
+    ))
     return float(np.clip(ss_between / ss_total, 0.0, 1.0))
 
 
 def eta_squared_categorical(z_col: np.ndarray, cat_target: np.ndarray) -> float:
-    """η² for a categorical group variable (any number of classes)."""
-    valid_mask = np.array([v is not np.nan and str(v) not in {"nan", "None", "none", ""} for v in cat_target])
+    """η² for a categorical grouping variable (any number of classes)."""
+    valid_mask = np.array(
+        [v is not np.nan and str(v) not in {"nan", "None", "none", ""} for v in cat_target],
+        dtype=bool,
+    )
     valid_mask &= np.isfinite(z_col)
     if valid_mask.sum() < 3:
         return float("nan")
     z = z_col[valid_mask]
     cats = cat_target[valid_mask].astype(str)
     grand_mean = z.mean()
-    ss_total = np.sum((z - grand_mean) ** 2)
+    ss_total = float(np.sum((z - grand_mean) ** 2))
     if ss_total < 1e-12:
         return 0.0
-    groups = np.unique(cats)
-    ss_between = sum(
+    ss_between = float(sum(
         np.sum(cats == g) * (z[cats == g].mean() - grand_mean) ** 2
-        for g in groups
-    )
+        for g in np.unique(cats)
+    ))
     return float(np.clip(ss_between / ss_total, 0.0, 1.0))
 
 
@@ -245,154 +271,164 @@ def compute_concept_scores(
     pathology_cols: list[str],
     attr_arrays: dict[str, np.ndarray],
 ) -> pd.DataFrame:
-    """Compute η² for every concept dimension vs every target.
+    """Compute η² for every concept vs every target and per-pair specificity.
 
-    Returns a DataFrame with one row per concept and columns:
-      concept_idx, path_eta2_<path>, demo_eta2_<attr>, max_demo_eta2,
-      max_path_eta2, specificity
+    Per-pair specificity for concept c, demographic attr A, pathology P:
+        spec(c, A, P) = demo_η²_A(c) − path_η²_P(c)
+
+    Columns in returned DataFrame:
+        concept_idx
+        demo_eta2_<attr>           — η² vs each demographic attribute
+        path_eta2_<safe_path>      — η² vs each pathology label
+        spec_<attr>_<safe_path>    — per-pair specificity (one col per attr × path)
+        max_demo_eta2              — max across attributes (summary)
+        max_path_eta2              — max across pathologies (summary)
     """
     n_concepts = z.shape[1]
+    safe_paths = [_safe(p) for p in pathology_cols]
     rows: list[dict] = []
 
     for c_idx in range(n_concepts):
         z_col = z[:, c_idx]
         row: dict = {"concept_idx": c_idx}
 
-        # Pathology η² (binary targets)
-        path_eta2_vals: list[float] = []
-        for p_idx, pname in enumerate(pathology_cols):
-            y_bin = y_pathology[:, p_idx].astype(float)
-            val = eta_squared_binary(z_col, y_bin)
-            row[f"path_eta2_{pname}"] = val
-            if np.isfinite(val):
-                path_eta2_vals.append(val)
+        # ── Pathology η² (binary) ────────────────────────────────────────────
+        path_eta2: dict[str, float] = {}
+        for p_idx, (pname, safe_p) in enumerate(zip(pathology_cols, safe_paths)):
+            val = eta_squared_binary(z_col, y_pathology[:, p_idx].astype(float))
+            row[f"path_eta2_{safe_p}"] = val
+            path_eta2[safe_p] = val
 
-        # Demographic η²
-        demo_eta2_vals: list[float] = []
+        # ── Demographic η² (categorical) ─────────────────────────────────────
+        demo_eta2: dict[str, float] = {}
         for attr, attr_vals in attr_arrays.items():
             val = eta_squared_categorical(z_col, attr_vals)
             row[f"demo_eta2_{attr}"] = val
-            if np.isfinite(val):
-                demo_eta2_vals.append(val)
+            demo_eta2[attr] = val
 
-        row["max_demo_eta2"] = float(np.max(demo_eta2_vals)) if demo_eta2_vals else float("nan")
-        row["max_path_eta2"] = float(np.max(path_eta2_vals)) if path_eta2_vals else float("nan")
-        row["mean_demo_eta2"] = float(np.mean(demo_eta2_vals)) if demo_eta2_vals else float("nan")
-        row["mean_path_eta2"] = float(np.mean(path_eta2_vals)) if path_eta2_vals else float("nan")
-        row["specificity"] = (
-            row["max_demo_eta2"] - row["max_path_eta2"]
-            if np.isfinite(row["max_demo_eta2"]) and np.isfinite(row["max_path_eta2"])
-            else float("nan")
-        )
+        # ── Per-pair specificity ──────────────────────────────────────────────
+        for attr, de in demo_eta2.items():
+            for safe_p, pe in path_eta2.items():
+                if np.isfinite(de) and np.isfinite(pe):
+                    row[f"spec_{attr}_{safe_p}"] = de - pe
+                else:
+                    row[f"spec_{attr}_{safe_p}"] = float("nan")
+
+        # ── Summary statistics (for scatter / grid plots) ────────────────────
+        valid_demo = [v for v in demo_eta2.values() if np.isfinite(v)]
+        valid_path = [v for v in path_eta2.values() if np.isfinite(v)]
+        row["max_demo_eta2"] = float(np.max(valid_demo)) if valid_demo else float("nan")
+        row["max_path_eta2"] = float(np.max(valid_path)) if valid_path else float("nan")
+        row["mean_demo_eta2"] = float(np.mean(valid_demo)) if valid_demo else float("nan")
+        row["mean_path_eta2"] = float(np.mean(valid_path)) if valid_path else float("nan")
+
         rows.append(row)
 
     return pd.DataFrame(rows)
 
 
-# ── Per-SAE plots ──────────────────────────────────────────────────────────────
+# ── Per-SAE: per-pair top-10 plots ────────────────────────────────────────────
 
-def _plot_top10_per_demo(
+def _plot_top10_per_pair(
     scores_df: pd.DataFrame,
     attr: str,
-    k: int,
-    latent_dim: int,
-    out_dir: Path,
-) -> None:
-    """Horizontal bar chart: top-10 concepts by demo_η² for one attribute.
-
-    Each bar cluster shows demo_η², path_η², and specificity.
-    """
-    demo_col = f"demo_eta2_{attr}"
-    if demo_col not in scores_df.columns:
-        return
-
-    sub = scores_df[[demo_col, "max_path_eta2", "specificity", "concept_idx"]].dropna(
-        subset=[demo_col]
-    )
-    top = sub.nlargest(TOP_N, demo_col).reset_index(drop=True)
-    if top.empty:
-        return
-
-    labels = [f"c{int(r.concept_idx)}" for _, r in top.iterrows()]
-    demo_vals = top[demo_col].tolist()
-    path_vals = top["max_path_eta2"].tolist()
-    spec_vals = top["specificity"].tolist()
-
-    x = np.arange(len(labels))
-    width = 0.25
-
-    fig, ax = plt.subplots(figsize=(10, max(4, len(labels) * 0.5)))
-    ax.bar(x - width, demo_vals, width, label=f"demo η² ({attr})", color="#4C78A8", alpha=0.85)
-    ax.bar(x, path_vals, width, label="max path η²", color="#F58518", alpha=0.85)
-    ax.bar(x + width, spec_vals, width, label="specificity (demo−path)", color="#54A24B", alpha=0.85)
-
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=8)
-    ax.set_ylabel("η²")
-    ax.set_ylim(bottom=0)
-    ax.set_title(
-        f"Top-{TOP_N} concepts by demo η² ({attr.replace('_', ' ')})\n"
-        f"SAE: k={k}, latent_dim={latent_dim}"
-    )
-    ax.legend(fontsize=8)
-    fig.tight_layout()
-    safe = attr.replace(" ", "_")
-    path = out_dir / f"top10_per_demo_{safe}.png"
-    fig.savefig(path, dpi=150)
-    plt.close(fig)
-    logger.info("  Saved → %s", path.name)
-
-
-def _plot_top10_per_pathology(
-    scores_df: pd.DataFrame,
     pathology: str,
     k: int,
     latent_dim: int,
     out_dir: Path,
 ) -> None:
-    """Top-10 concepts with highest demo η² that also have non-trivial path η² for this pathology."""
-    path_col = f"path_eta2_{pathology}"
-    if path_col not in scores_df.columns:
+    """3-bar cluster plot: top-10 concepts ranked by spec(attr, pathology).
+
+    Bars show demo_η²_attr, path_η²_pathology, and pair_specificity for each concept.
+    """
+    safe_p = _safe(pathology)
+    spec_col = f"spec_{attr}_{safe_p}"
+    demo_col = f"demo_eta2_{attr}"
+    path_col = f"path_eta2_{safe_p}"
+
+    if spec_col not in scores_df.columns:
         return
 
-    # Rank by demo η² (demographic specificity)
-    sub = scores_df[["max_demo_eta2", path_col, "specificity", "concept_idx"]].dropna(
-        subset=["max_demo_eta2", path_col]
-    )
-    # Show concepts most associated with this pathology
-    top = sub.nlargest(TOP_N, path_col).reset_index(drop=True)
+    sub = scores_df[[spec_col, demo_col, path_col, "concept_idx"]].dropna(subset=[spec_col])
+    top = sub.nlargest(TOP_N, spec_col).reset_index(drop=True)
     if top.empty:
         return
 
     labels = [f"c{int(r.concept_idx)}" for _, r in top.iterrows()]
-    demo_vals = top["max_demo_eta2"].tolist()
-    path_vals = top[path_col].tolist()
-    spec_vals = top["specificity"].tolist()
+    demo_vals = top[demo_col].fillna(0).tolist()
+    path_vals = top[path_col].fillna(0).tolist()
+    spec_vals = top[spec_col].fillna(0).tolist()
 
     x = np.arange(len(labels))
     width = 0.25
 
-    fig, ax = plt.subplots(figsize=(10, max(4, len(labels) * 0.5)))
-    ax.bar(x - width, demo_vals, width, label="max demo η²", color="#4C78A8", alpha=0.85)
-    ax.bar(x, path_vals, width, label=f"path η² ({pathology})", color="#F58518", alpha=0.85)
-    ax.bar(x + width, spec_vals, width, label="specificity (demo−path)", color="#54A24B", alpha=0.85)
+    fig, ax = plt.subplots(figsize=(max(8, len(labels) * 0.9), 4.5))
+    ax.bar(x - width, demo_vals, width, label=f"demo η² ({attr.replace('_',' ')})", color="#4C78A8", alpha=0.85)
+    ax.bar(x,          path_vals, width, label=f"path η² ({pathology})",              color="#F58518", alpha=0.85)
+    ax.bar(x + width,  spec_vals, width, label="pair specificity (demo−path)",         color="#54A24B", alpha=0.85)
 
+    ax.axhline(0, color="black", linewidth=0.6, linestyle="--")
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=8)
     ax.set_ylabel("η²")
-    ax.set_ylim(bottom=0)
-    safe_path = pathology.replace(" ", "_").replace("/", "-")
     ax.set_title(
-        f"Top-{TOP_N} concepts for {pathology}\n"
-        f"SAE: k={k}, latent_dim={latent_dim}"
+        f"Top-{TOP_N} concepts  ·  demo={attr.replace('_',' ')}  ·  path={pathology}\n"
+        f"SAE: k={k}, latent_dim={latent_dim}",
+        fontsize=9,
     )
     ax.legend(fontsize=8)
     fig.tight_layout()
-    path = out_dir / f"top10_per_path_{safe_path}.png"
-    fig.savefig(path, dpi=150)
+    path_out = out_dir / f"top10_{attr}_{safe_p}.png"
+    fig.savefig(path_out, dpi=150)
     plt.close(fig)
-    logger.info("  Saved → %s", path.name)
 
+
+def _plot_pair_overview_heatmap(
+    scores_df: pd.DataFrame,
+    attr_names: list[str],
+    pathology_cols: list[str],
+    k: int,
+    latent_dim: int,
+    out_dir: Path,
+) -> None:
+    """(attr × path) heatmap showing max single-concept specificity for this SAE.
+
+    Gives a quick overview of which (demographic, pathology) pairs this SAE is
+    most informative about.
+    """
+    safe_paths = [_safe(p) for p in pathology_cols]
+    matrix = np.full((len(attr_names), len(pathology_cols)), fill_value=float("nan"))
+
+    for ai, attr in enumerate(attr_names):
+        for pi, safe_p in enumerate(safe_paths):
+            col = f"spec_{attr}_{safe_p}"
+            if col in scores_df.columns:
+                matrix[ai, pi] = float(scores_df[col].dropna().max())
+
+    fig, ax = plt.subplots(figsize=(max(8, len(pathology_cols) * 0.9), max(3, len(attr_names) * 0.8)))
+    sns.heatmap(
+        matrix,
+        ax=ax,
+        xticklabels=pathology_cols,
+        yticklabels=[a.replace("_", " ") for a in attr_names],
+        annot=True,
+        fmt=".3f",
+        cmap="viridis",
+        cbar_kws={"label": "Max single-concept pair specificity"},
+        linewidths=0.4,
+    )
+    ax.set_xticklabels(ax.get_xticklabels(), rotation=40, ha="right", fontsize=8)
+    ax.set_title(
+        f"Max Pair Specificity per (demo, pathology)\nSAE: k={k}, latent_dim={latent_dim}",
+        fontsize=9,
+    )
+    fig.tight_layout()
+    fig.savefig(out_dir / "pair_overview.png", dpi=150)
+    plt.close(fig)
+    logger.info("  Saved → pair_overview.png")
+
+
+# ── Per-SAE: activation distribution plots ───────────────────────────────────
 
 def _plot_activation_dist(
     z: np.ndarray,
@@ -403,33 +439,39 @@ def _plot_activation_dist(
     latent_dim: int,
     out_dir: Path,
 ) -> None:
-    """Box plots of top-5 demo concepts' activation distributions, split by group."""
+    """Box plots of top-5 concepts' activations, split by demographic group.
+
+    Top concepts selected by demo_η²_attr — shows whether the concepts that are
+    most correlated with this attribute activate differently across groups.
+    """
     demo_col = f"demo_eta2_{attr}"
     if demo_col not in scores_df.columns:
         return
 
     top5 = (
-        scores_df[[demo_col, "concept_idx"]]
+        scores_df[["concept_idx", demo_col]]
         .dropna(subset=[demo_col])
         .nlargest(TOP_DIST, demo_col)
     )
     if top5.empty:
         return
 
-    groups = sorted(np.unique(attr_vals[~pd.isna(attr_vals)].astype(str)))
-    palette = sns.color_palette("tab10", len(groups))
+    groups = sorted(
+        np.unique(attr_vals[~pd.isna(attr_vals)].astype(str))
+    )
+    if len(groups) < 2:
+        return
 
+    palette = sns.color_palette("tab10", len(groups))
     fig, axes = plt.subplots(1, len(top5), figsize=(4 * len(top5), 4), squeeze=False)
 
     for ax_i, (_, row) in enumerate(top5.iterrows()):
         c_idx = int(row["concept_idx"])
+        eta2_val = float(row[demo_col])
         ax = axes[0][ax_i]
-        data_per_group = []
-        for g in groups:
-            mask = attr_vals.astype(str) == g
-            data_per_group.append(z[mask, c_idx])
+        data_groups = [z[attr_vals.astype(str) == g, c_idx] for g in groups]
         bp = ax.boxplot(
-            data_per_group,
+            data_groups,
             patch_artist=True,
             showfliers=False,
             medianprops={"color": "black", "linewidth": 1.5},
@@ -438,86 +480,184 @@ def _plot_activation_dist(
             patch.set_facecolor(color)
             patch.set_alpha(0.7)
         ax.set_xticklabels(groups, rotation=30, ha="right", fontsize=7)
-        ax.set_title(f"c{c_idx}\nη²={row[demo_col]:.3f}", fontsize=8)
+        ax.set_title(f"c{c_idx}\nη²={eta2_val:.3f}", fontsize=8)
         ax.set_ylabel("Activation" if ax_i == 0 else "")
 
-    safe = attr.replace(" ", "_")
     fig.suptitle(
         f"Top-{TOP_DIST} concept activations by {attr.replace('_', ' ')}\n"
         f"SAE: k={k}, latent_dim={latent_dim}",
-        fontsize=10,
+        fontsize=9,
     )
     fig.tight_layout()
-    path = out_dir / f"activation_dist_{safe}.png"
-    fig.savefig(path, dpi=150)
+    fig.savefig(out_dir / f"activation_dist_{attr}.png", dpi=150)
     plt.close(fig)
-    logger.info("  Saved → %s", path.name)
+    logger.info("  Saved → activation_dist_%s.png", attr)
 
 
 # ── Grid-level plots ───────────────────────────────────────────────────────────
 
-def _plot_specificity_heatmap(
+def _plot_pair_grid_heatmap(
     grid_results: list[dict],
+    attr: str,
+    pathology: str,
     grid_out: Path,
 ) -> None:
-    """Heatmap of mean concept specificity across the k × latent_dim grid."""
+    """k×latent_dim heatmap of best single-concept specificity for one (attr, path) pair."""
+    safe_p = _safe(pathology)
+    col = f"best_spec_{attr}_{safe_p}"
+
     k_vals = sorted({r["k"] for r in grid_results})
     d_vals = sorted({r["latent_dim"] for r in grid_results})
-
     matrix = np.full((len(k_vals), len(d_vals)), fill_value=float("nan"))
+
+    for r in grid_results:
+        if col in r:
+            matrix[k_vals.index(r["k"]), d_vals.index(r["latent_dim"])] = r[col]
+
+    if np.all(np.isnan(matrix)):
+        return
+
+    fig, ax = plt.subplots(figsize=(len(d_vals) * 1.6 + 1.5, len(k_vals) * 1.2 + 1.5))
+    sns.heatmap(
+        matrix,
+        ax=ax,
+        xticklabels=[str(d) for d in d_vals],
+        yticklabels=[str(kv) for kv in k_vals],
+        annot=True,
+        fmt=".3f",
+        cmap="viridis",
+        cbar_kws={"label": "Max single-concept pair specificity"},
+        linewidths=0.5,
+    )
+    ax.set_xlabel("Latent dim")
+    ax.set_ylabel("k")
+    ax.set_title(
+        f"Best single-concept specificity\ndemo={attr.replace('_',' ')}  ·  path={pathology}",
+        fontsize=9,
+    )
+    fig.tight_layout()
+    safe_attr = _safe(attr)
+    fig.savefig(grid_out / f"spec_{safe_attr}_{safe_p}.png", dpi=150)
+    plt.close(fig)
+
+
+def _plot_best_sae_heatmap(
+    best_sae_df: pd.DataFrame,
+    attr_names: list[str],
+    pathology_cols: list[str],
+    grid_out: Path,
+) -> None:
+    """(attr × path) heatmap showing the best architecture label for each pair."""
+    safe_paths = [_safe(p) for p in pathology_cols]
+    labels = np.full((len(attr_names), len(pathology_cols)), fill_value="", dtype=object)
+    values = np.full((len(attr_names), len(pathology_cols)), fill_value=float("nan"))
+
+    for _, row in best_sae_df.iterrows():
+        ai = attr_names.index(row["attr"]) if row["attr"] in attr_names else -1
+        pi = pathology_cols.index(row["pathology"]) if row["pathology"] in pathology_cols else -1
+        if ai >= 0 and pi >= 0:
+            labels[ai, pi] = f"k{int(row['best_k'])}\nd{int(row['best_dim'])}"
+            values[ai, pi] = float(row["best_spec"])
+
+    fig, axes = plt.subplots(
+        1, 2, figsize=(max(10, len(pathology_cols) * 1.0 + 2), max(4, len(attr_names) * 0.9 + 2)),
+        gridspec_kw={"width_ratios": [1, 1]},
+    )
+
+    # Left: architecture labels
+    ax = axes[0]
+    im = ax.imshow(values, cmap="viridis", aspect="auto")
+    plt.colorbar(im, ax=ax, label="Best pair specificity")
+    ax.set_xticks(range(len(pathology_cols)))
+    ax.set_xticklabels(pathology_cols, rotation=45, ha="right", fontsize=7)
+    ax.set_yticks(range(len(attr_names)))
+    ax.set_yticklabels([a.replace("_", " ") for a in attr_names], fontsize=8)
+    for ai in range(len(attr_names)):
+        for pi in range(len(pathology_cols)):
+            if labels[ai, pi]:
+                ax.text(pi, ai, labels[ai, pi], ha="center", va="center",
+                        fontsize=6, color="white", fontweight="bold")
+    ax.set_title("Best SAE architecture\nper (demo, path) pair", fontsize=9)
+
+    # Right: seaborn heatmap of the best-spec values
+    ax2 = axes[1]
+    sns.heatmap(
+        values,
+        ax=ax2,
+        xticklabels=pathology_cols,
+        yticklabels=[a.replace("_", " ") for a in attr_names],
+        annot=np.round(values, 3),
+        fmt="",
+        cmap="viridis",
+        cbar_kws={"label": "Best pair specificity"},
+        linewidths=0.3,
+    )
+    ax2.set_xticklabels(ax2.get_xticklabels(), rotation=45, ha="right", fontsize=7)
+    ax2.set_title("Best single-concept specificity\nper (demo, path) pair", fontsize=9)
+
+    fig.suptitle("Best SAE Architecture per (Demographic, Pathology) Pair", fontsize=10, y=1.01)
+    fig.tight_layout()
+    fig.savefig(grid_out / "best_sae_heatmap.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    logger.info("Saved → best_sae_heatmap.png")
+
+
+def _plot_specificity_heatmap(grid_results: list[dict], grid_out: Path) -> None:
+    """k×latent_dim heatmap of mean pair-specificity (averaged across all pairs)."""
+    k_vals = sorted({r["k"] for r in grid_results})
+    d_vals = sorted({r["latent_dim"] for r in grid_results})
+    matrix = np.full((len(k_vals), len(d_vals)), fill_value=float("nan"))
+
     for r in grid_results:
         ki = k_vals.index(r["k"])
         di = d_vals.index(r["latent_dim"])
-        matrix[ki, di] = r["mean_specificity"]
+        matrix[ki, di] = r["mean_pair_specificity"]
 
     fig, ax = plt.subplots(figsize=(len(d_vals) * 1.8 + 1.5, len(k_vals) * 1.5 + 1.5))
     sns.heatmap(
         matrix,
         ax=ax,
         xticklabels=[str(d) for d in d_vals],
-        yticklabels=[str(k) for k in k_vals],
+        yticklabels=[str(kv) for kv in k_vals],
         annot=True,
-        fmt=".3f",
+        fmt=".4f",
         cmap="viridis",
-        cbar_kws={"label": "Mean concept specificity (demo η² − path η²)"},
+        cbar_kws={"label": "Mean pair specificity (averaged across all demo×path pairs)"},
         linewidths=0.5,
     )
     ax.set_xlabel("Latent dim")
-    ax.set_ylabel("Top-k (k)")
-    ax.set_title("Mean Concept Specificity Across SAE Grid\n(higher = more demographic-specific concepts)")
+    ax.set_ylabel("k")
+    ax.set_title(
+        "Mean Pair Specificity Across SAE Grid\n"
+        "(avg of max single-concept spec over all demo×path pairs)"
+    )
     fig.tight_layout()
-    path = grid_out / "specificity_heatmap.png"
-    fig.savefig(path, dpi=150)
+    fig.savefig(grid_out / "specificity_heatmap.png", dpi=150)
     plt.close(fig)
-    logger.info("Saved → %s", path)
+    logger.info("Saved → specificity_heatmap.png")
 
 
-def _plot_demo_vs_path_scatter(
-    grid_results: list[dict],
-    grid_out: Path,
-) -> None:
-    """Per-SAE scatter: mean demo η² vs mean path η², coloured by specificity."""
+def _plot_demo_vs_path_scatter(grid_results: list[dict], grid_out: Path) -> None:
+    """Per-SAE scatter: mean demo_η² vs mean path_η², coloured by mean pair specificity."""
     if not grid_results:
         return
-
     df = pd.DataFrame(grid_results)
-    palette = sns.color_palette("coolwarm_r", as_cmap=True)
 
     fig, ax = plt.subplots(figsize=(8, 6))
     sc = ax.scatter(
         df["mean_path_eta2"],
         df["mean_demo_eta2"],
-        c=df["mean_specificity"],
-        cmap=palette,
+        c=df["mean_pair_specificity"],
+        cmap="coolwarm_r",
         s=120,
         edgecolors="k",
         linewidths=0.5,
         zorder=3,
     )
-    plt.colorbar(sc, ax=ax, label="mean specificity")
-    ax.plot([0, df[["mean_path_eta2", "mean_demo_eta2"]].max().max()],
-            [0, df[["mean_path_eta2", "mean_demo_eta2"]].max().max()],
-            "grey", linestyle="--", linewidth=0.8, zorder=2)
+    plt.colorbar(sc, ax=ax, label="mean pair specificity")
+
+    lim = df[["mean_path_eta2", "mean_demo_eta2"]].max().max() * 1.1
+    ax.plot([0, lim], [0, lim], "grey", linestyle="--", linewidth=0.8, zorder=2)
 
     for _, row in df.iterrows():
         ax.annotate(
@@ -528,14 +668,16 @@ def _plot_demo_vs_path_scatter(
             textcoords="offset points",
         )
 
-    ax.set_xlabel("Mean path η² (pathology correlation)")
-    ax.set_ylabel("Mean demo η² (demographic correlation)")
-    ax.set_title("Demo η² vs Path η² per SAE\n(above dashed = more demographic than pathology signal)")
+    ax.set_xlabel("Mean path η² (avg concept × pathology)")
+    ax.set_ylabel("Mean demo η² (avg concept × demographic)")
+    ax.set_title(
+        "Demo η² vs Path η² per SAE\n"
+        "(above dashed line = more demographic than pathology signal)"
+    )
     fig.tight_layout()
-    path = grid_out / "scatter_demo_vs_path.png"
-    fig.savefig(path, dpi=150)
+    fig.savefig(grid_out / "scatter_demo_vs_path.png", dpi=150)
     plt.close(fig)
-    logger.info("Saved → %s", path)
+    logger.info("Saved → scatter_demo_vs_path.png")
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
@@ -554,7 +696,7 @@ def main() -> None:
     base_out = Path(args.output_dir) if args.output_dir else cfg.output_root / "presentation" / "sae-eval"
     base_out.mkdir(parents=True, exist_ok=True)
     grid_out = base_out / "grid"
-    grid_out.mkdir(exist_ok=True)
+    (grid_out / "pair_heatmaps").mkdir(parents=True, exist_ok=True)
     logger.info("Outputs → %s", base_out.resolve())
 
     # ── Unpack bundle ──────────────────────────────────────────────────────────
@@ -569,39 +711,34 @@ def main() -> None:
     train_mask = splits == "train"
     valid_mask = splits == cfg.data.validation_split_name
 
-    logger.info(
-        "Split sizes — train: %d  valid: %d",
-        train_mask.sum(), valid_mask.sum(),
-    )
+    logger.info("Split sizes — train: %d  valid: %d", train_mask.sum(), valid_mask.sum())
 
     x_train = x[train_mask]
     x_valid = x[valid_mask]
-
-    # Use validation set for η² analysis (held-out)
     y_val = y_pathology[valid_mask]
     meta_val = metadata[valid_mask].reset_index(drop=True)
     age_group_val = age_group[valid_mask]
 
-    # Build attribute arrays for the validation set
-    attr_arrays: dict[str, np.ndarray] = {"age_group": _clean_attr(age_group_val)}
+    # Build attribute arrays for the validation set (used for η² analysis)
+    attr_arrays: dict[str, np.ndarray] = {
+        "age_group": _clean_attr(age_group_val),
+    }
     for attr in ["sex", "race", "insurance_type"]:
         if attr in meta_val.columns:
             attr_arrays[attr] = _clean_attr(meta_val[attr].to_numpy())
         else:
             logger.warning("Attribute '%s' not found in metadata; skipping.", attr)
 
-    device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
-    logger.info("Using device: %s", device)
+    attr_names = list(attr_arrays.keys())
+    safe_paths = [_safe(p) for p in pathology_cols]
 
+    device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     epochs = args.epochs
     input_dim = x_train.shape[1]
+
     logger.info(
-        "Training %d SAEs (k ∈ %s × latent_dim ∈ %s), %d epochs each, input_dim=%d",
-        len(K_VALUES) * len(DIM_VALUES),
-        K_VALUES,
-        DIM_VALUES,
-        epochs,
-        input_dim,
+        "Training %d SAEs (k ∈ %s × latent_dim ∈ %s), %d epochs, input_dim=%d",
+        len(K_VALUES) * len(DIM_VALUES), K_VALUES, DIM_VALUES, epochs, input_dim,
     )
 
     grid_results: list[dict] = []
@@ -609,11 +746,11 @@ def main() -> None:
     for k, latent_dim in product(K_VALUES, DIM_VALUES):
         run_label = f"k{k}_d{latent_dim}"
         run_out = base_out / run_label
-        run_out.mkdir(exist_ok=True)
+        pair_out = run_out / "per_pair"
+        pair_out.mkdir(parents=True, exist_ok=True)
 
         logger.info("─── SAE %s ───", run_label)
 
-        # Train
         model = train_topk_sae(
             x_train=x_train,
             x_valid=x_valid,
@@ -623,51 +760,101 @@ def main() -> None:
             device=device,
         )
 
-        # Encode validation set
         z_val = encode_all(model, x_valid, device)
 
-        # Compute concept scores
-        logger.info("  Computing η² for %d concepts × %d targets…", latent_dim, len(pathology_cols) + len(attr_arrays))
-        scores_df = compute_concept_scores(z_val, y_val, pathology_cols, attr_arrays)
-        scores_csv = run_out / "concept_scores.csv"
-        scores_df.to_csv(scores_csv, index=False)
-        logger.info("  Saved concept scores → %s", scores_csv.name)
-
-        mean_spec = float(scores_df["specificity"].dropna().mean())
-        mean_demo = float(scores_df["mean_demo_eta2"].dropna().mean())
-        mean_path = float(scores_df["mean_path_eta2"].dropna().mean())
         logger.info(
-            "  mean_specificity=%.4f  mean_demo_η²=%.4f  mean_path_η²=%.4f",
-            mean_spec, mean_demo, mean_path,
+            "  Computing η² for %d concepts × %d targets…",
+            latent_dim,
+            len(pathology_cols) + len(attr_arrays),
         )
+        scores_df = compute_concept_scores(z_val, y_val, pathology_cols, attr_arrays)
+        scores_df.to_csv(run_out / "concept_scores.csv", index=False)
+        logger.info("  Saved concept_scores.csv (%d rows, %d cols)", len(scores_df), len(scores_df.columns))
 
-        grid_results.append({
-            "k": k,
-            "latent_dim": latent_dim,
-            "mean_specificity": mean_spec,
-            "mean_demo_eta2": mean_demo,
-            "mean_path_eta2": mean_path,
-        })
+        # ── Per-pair top-10 plots ─────────────────────────────────────────────
+        n_pair_plots = 0
+        for attr in attr_names:
+            for pathology in pathology_cols:
+                _plot_top10_per_pair(scores_df, attr, pathology, k, latent_dim, pair_out)
+                n_pair_plots += 1
+        logger.info("  Saved %d per-pair top-10 plots → per_pair/", n_pair_plots)
 
-        # Per-demographic plots
-        for attr in list(attr_arrays.keys()):
-            _plot_top10_per_demo(scores_df, attr, k, latent_dim, run_out)
+        # ── Overview heatmap ──────────────────────────────────────────────────
+        _plot_pair_overview_heatmap(scores_df, attr_names, pathology_cols, k, latent_dim, run_out)
+
+        # ── Activation distribution plots ─────────────────────────────────────
+        for attr in attr_names:
             _plot_activation_dist(z_val, scores_df, attr, attr_arrays[attr], k, latent_dim, run_out)
 
-        # Per-pathology plots
-        for pathology in pathology_cols:
-            _plot_top10_per_pathology(scores_df, pathology, k, latent_dim, run_out)
+        # ── Collect grid summary stats ────────────────────────────────────────
+        result: dict = {"k": k, "latent_dim": latent_dim}
 
-    # ── Grid-level plots ───────────────────────────────────────────────────────
+        pair_best_specs: list[float] = []
+        for attr in attr_names:
+            for pathology, safe_p in zip(pathology_cols, safe_paths):
+                col = f"spec_{attr}_{safe_p}"
+                if col in scores_df.columns:
+                    best = float(scores_df[col].dropna().max())
+                else:
+                    best = float("nan")
+                result[f"best_spec_{attr}_{safe_p}"] = best
+                if np.isfinite(best):
+                    pair_best_specs.append(best)
+
+        result["mean_pair_specificity"] = float(np.mean(pair_best_specs)) if pair_best_specs else float("nan")
+        result["mean_demo_eta2"] = float(scores_df["mean_demo_eta2"].dropna().mean())
+        result["mean_path_eta2"] = float(scores_df["mean_path_eta2"].dropna().mean())
+
+        logger.info(
+            "  mean_pair_spec=%.4f  mean_demo_η²=%.4f  mean_path_η²=%.4f",
+            result["mean_pair_specificity"],
+            result["mean_demo_eta2"],
+            result["mean_path_eta2"],
+        )
+        grid_results.append(result)
+
+    # ── Grid-level outputs ─────────────────────────────────────────────────────
     logger.info("Generating grid-level plots…")
+
+    grid_df = pd.DataFrame(grid_results).sort_values(["k", "latent_dim"])
+    grid_df.to_csv(grid_out / "grid_summary.csv", index=False)
+    logger.info("Saved → grid_summary.csv")
+
+    # Per-pair grid heatmaps + build best-SAE lookup
+    best_sae_rows: list[dict] = []
+    pair_heatmap_out = grid_out / "pair_heatmaps"
+
+    for attr in attr_names:
+        for pathology, safe_p in zip(pathology_cols, safe_paths):
+            _plot_pair_grid_heatmap(grid_results, attr, pathology, pair_heatmap_out)
+
+            # Find best SAE for this pair
+            col = f"best_spec_{attr}_{safe_p}"
+            best_val = float("-inf")
+            best_k, best_dim = -1, -1
+            for r in grid_results:
+                v = r.get(col, float("nan"))
+                if np.isfinite(v) and v > best_val:
+                    best_val = v
+                    best_k = r["k"]
+                    best_dim = r["latent_dim"]
+            best_sae_rows.append({
+                "attr": attr,
+                "pathology": pathology,
+                "best_k": best_k,
+                "best_dim": best_dim,
+                "best_spec": best_val if best_val > float("-inf") else float("nan"),
+            })
+
+    logger.info("Saved %d per-pair grid heatmaps → grid/pair_heatmaps/", len(best_sae_rows))
+
+    best_sae_df = pd.DataFrame(best_sae_rows)
+    best_sae_df.to_csv(grid_out / "best_sae_per_pair.csv", index=False)
+    logger.info("Saved → best_sae_per_pair.csv")
+
+    _plot_best_sae_heatmap(best_sae_df, attr_names, pathology_cols, grid_out)
     _plot_specificity_heatmap(grid_results, grid_out)
     _plot_demo_vs_path_scatter(grid_results, grid_out)
-
-    # Save grid summary CSV
-    grid_df = pd.DataFrame(grid_results).sort_values(["k", "latent_dim"])
-    grid_csv = grid_out / "grid_summary.csv"
-    grid_df.to_csv(grid_csv, index=False)
-    logger.info("Saved grid summary → %s", grid_csv)
 
     logger.info("Done. All outputs in %s", base_out.resolve())
 
