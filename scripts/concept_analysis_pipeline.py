@@ -807,6 +807,152 @@ def _run_all_interventions(cfg, base_out: Path, args: argparse.Namespace) -> Non
         subprocess.run(cmd, check=False)
 
     logger.info("All interventions complete.")
+    _generate_intervention_summary_roc(interventions_out, pairs, "0.02")
+
+
+def _generate_intervention_summary_roc(
+    interventions_out: Path,
+    pairs: list,
+    threshold: str,
+) -> None:
+    """Generate 14 per-pathology summary ROC figures after all 56 interventions finish.
+
+    Each figure has 4 subplots (one per demographic attribute).  Within each
+    subplot the per-group ROC curves for baseline (solid) and ablated (dashed)
+    are drawn from the specific intervention that targeted that (attr, pathology)
+    pair — so every quadrant reflects the right ablation.
+    """
+    from sklearn.metrics import roc_auc_score, roc_curve  # local import
+
+    summary_dir = interventions_out / "summary"
+    summary_dir.mkdir(parents=True, exist_ok=True)
+
+    # Collect all pathologies and attrs from available pairs
+    pathologies = list(dict.fromkeys(p.pathology for p in pairs))
+    attrs       = list(dict.fromkeys(p.attr      for p in pairs))
+    n_cols = 2
+    n_rows = (len(attrs) + 1) // 2
+
+    for pathology in pathologies:
+        safe_p = pathology.replace(" ", "_").replace("/", "-")
+        fig, axes = plt.subplots(
+            n_rows, n_cols,
+            figsize=(n_cols * 5.5, n_rows * 5),
+            squeeze=False,
+        )
+        fig.suptitle(
+            f"ROC Curves — {pathology}\n"
+            "Each quadrant: intervention targeting that (demographic, pathology) pair\n"
+            "Solid = baseline  ·  Dashed = ablated",
+            fontsize=10, fontweight="bold", y=1.02,
+        )
+
+        for ax_idx, attr in enumerate(attrs):
+            ax = axes[ax_idx // n_cols][ax_idx % n_cols]
+            safe_attr = attr.replace(" ", "_").replace("/", "-")
+            tag = f"{safe_attr}_{safe_p}_t{threshold}"
+            pair_dir = interventions_out / tag
+
+            # Load scores from this (attr, pathology) pair
+            baseline_npz  = pair_dir / "baseline" / "scores.npz"
+            ablated_npz   = pair_dir / "ablated"  / "scores.npz"
+            attr_npz      = pair_dir / "attr_arrays.npz"
+
+            if not (baseline_npz.exists() and ablated_npz.exists() and attr_npz.exists()):
+                ax.text(0.5, 0.5, "no data", ha="center", va="center", transform=ax.transAxes)
+                ax.set_title(f"{attr.replace('_',' ').title()}\n(data missing)", fontsize=9)
+                continue
+
+            try:
+                b_data  = np.load(baseline_npz)
+                a_data  = np.load(ablated_npz)
+                at_data = np.load(attr_npz)
+            except Exception as exc:
+                ax.text(0.5, 0.5, str(exc), ha="center", va="center",
+                        fontsize=6, transform=ax.transAxes)
+                continue
+
+            # y_valid shape: (n_samples, n_pathologies); column order matches pathology_cols
+            y_valid_b  = b_data["y_valid"]
+            y_scores_b = b_data["y_scores"]
+            y_scores_a = a_data["y_scores"]
+
+            # We need the column index for this pathology.
+            # Save pathology_cols in attr_arrays.npz wasn't done, so we derive from
+            # CSV if available, otherwise skip.
+            lin_csv = pair_dir / "baseline" / "linear_separability.csv"
+            if not lin_csv.exists():
+                ax.set_title(f"{attr.replace('_',' ').title()}\n(csv missing)", fontsize=9)
+                continue
+            lin_df = pd.read_csv(lin_csv)
+            if pathology not in lin_df["pathology"].values:
+                ax.set_title(f"{attr.replace('_',' ').title()}\n({pathology} not in data)", fontsize=9)
+                continue
+            p_idx = int(lin_df[lin_df["pathology"] == pathology].index[0])
+            if p_idx >= y_valid_b.shape[1]:
+                continue
+
+            y_true = y_valid_b[:, p_idx]
+            if len(np.unique(y_true)) < 2:
+                ax.set_title(f"{attr.replace('_',' ').title()}\n(one class only)", fontsize=9)
+                continue
+
+            attr_values = at_data.get(attr, at_data.get(attr.replace("_", ""), None))
+            if attr_values is None:
+                ax.set_title(f"{attr.replace('_',' ').title()}\n(attr not saved)", fontsize=9)
+                continue
+            attr_values = attr_values.astype(str)
+            # Mask out nan strings
+            valid_mask_a = ~np.isin(attr_values, {"nan", "None", "none", ""})
+
+            groups = sorted(np.unique(attr_values[valid_mask_a]))
+            palette = sns.color_palette("tab10", len(groups))
+
+            CONDITION_COLORS = {"baseline": "#4C78A8", "ablated": "#F58518"}
+            for (y_sc, cname, ls, lw) in [
+                (y_scores_b, "baseline", "-",  2.2),
+                (y_scores_a, "ablated",  "--", 1.8),
+            ]:
+                y_sc_p = y_sc[:, p_idx]
+                if len(np.unique(y_true)) < 2:
+                    continue
+                fpr_all, tpr_all, _ = roc_curve(y_true, y_sc_p)
+                auc_all = float(roc_auc_score(y_true, y_sc_p))
+                ax.plot(fpr_all, tpr_all, color=CONDITION_COLORS[cname],
+                        linewidth=lw, linestyle=ls,
+                        label=f"{cname} overall (AUC={auc_all:.3f})", zorder=5)
+
+                for color, g in zip(palette, groups):
+                    mask = attr_values == g
+                    y_g = y_true[mask]
+                    s_g = y_sc_p[mask]
+                    if len(np.unique(y_g)) < 2 or int((y_g == 1).sum()) < 5:
+                        continue
+                    fpr_g, tpr_g, _ = roc_curve(y_g, s_g)
+                    auc_g = float(roc_auc_score(y_g, s_g))
+                    ax.plot(fpr_g, tpr_g, color=color, linewidth=1.2, linestyle=ls, alpha=0.75,
+                            label=f"{cname} · {g} (AUC={auc_g:.3f})")
+
+            ax.plot([0, 1], [0, 1], color="lightgrey", linewidth=0.8, linestyle=":")
+            ax.set_xlim(0, 1); ax.set_ylim(0, 1.02)
+            ax.set_xlabel("FPR", fontsize=9); ax.set_ylabel("TPR", fontsize=9)
+            ax.set_title(
+                f"{attr.replace('_', ' ').title()}\n"
+                f"(targeted intervention for this pair)",
+                fontsize=9,
+            )
+            ax.legend(fontsize=6, loc="lower right")
+
+        for ax_idx in range(len(attrs), n_rows * n_cols):
+            axes[ax_idx // n_cols][ax_idx % n_cols].set_visible(False)
+
+        fig.tight_layout()
+        out_path = summary_dir / f"roc_summary_{safe_p}.png"
+        fig.savefig(out_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        logger.info("  Summary ROC → %s", out_path.name)
+
+    logger.info("Summary ROC plots saved to %s", summary_dir)
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────

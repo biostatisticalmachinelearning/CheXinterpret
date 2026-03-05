@@ -305,6 +305,13 @@ def _save_separate(result: EvalResult, pathology_cols: list[str],
     for attr in attr_arrays:
         _plot_tpr_by_group(result.tpr_df, attr, pathology_cols, result.overall_tpr, result.name, out_dir)
 
+    # Persist scores so post-hoc summary plots can load them without re-running.
+    np.savez_compressed(
+        out_dir / "scores.npz",
+        y_valid=result.y_valid.astype(np.float32),
+        y_scores=result.y_scores.astype(np.float32),
+    )
+
     roc_dir = out_dir / "roc_curves"
     roc_dir.mkdir(exist_ok=True)
     for p_idx, pathology in enumerate(pathology_cols):
@@ -651,20 +658,19 @@ def _plot_roc_comparison(
                     color=res.color, linewidth=2.5, linestyle=res.linestyle,
                     label=f"{res.name} overall (AUC={auc_all:.3f})", zorder=5)
 
-            # Per-group curves — thin, same line-style
-            if attr_name == target_attr:
-                groups = sorted(np.unique(attr_values[~pd.isna(attr_values)]))
-                group_palette = sns.color_palette("tab10", len(groups))
-                for color, g in zip(group_palette, groups):
-                    mask = attr_values == g
-                    y_g, s_g = y_true[mask], y_score[mask]
-                    if len(np.unique(y_g)) < 2 or (y_g == 1).sum() < MIN_POSITIVES:
-                        continue
-                    fpr_g, tpr_g, _ = roc_curve(y_g, s_g)
-                    auc_g = float(roc_auc_score(y_g, s_g))
-                    ax.plot(fpr_g, tpr_g, color=color, linewidth=1.2,
-                            linestyle=res.linestyle, alpha=0.7,
-                            label=f"{res.name} · {g} (AUC={auc_g:.3f})")
+            # Per-group curves — thin, drawn for every demographic subplot
+            groups = sorted(np.unique(attr_values[~pd.isna(attr_values)]))
+            group_palette = sns.color_palette("tab10", len(groups))
+            for color, g in zip(group_palette, groups):
+                mask = attr_values == g
+                y_g, s_g = y_true[mask], y_score[mask]
+                if len(np.unique(y_g)) < 2 or (y_g == 1).sum() < MIN_POSITIVES:
+                    continue
+                fpr_g, tpr_g, _ = roc_curve(y_g, s_g)
+                auc_g = float(roc_auc_score(y_g, s_g))
+                ax.plot(fpr_g, tpr_g, color=color, linewidth=1.2,
+                        linestyle=res.linestyle, alpha=0.7,
+                        label=f"{res.name} · {g} (AUC={auc_g:.3f})")
 
         ax.plot([0, 1], [0, 1], color="lightgrey", linewidth=0.8, linestyle=":")
         ax.set_xlim(0, 1); ax.set_ylim(0, 1.02)
@@ -914,8 +920,12 @@ def main() -> None:
     base_out.mkdir(parents=True, exist_ok=True)
     logger.info("Outputs → %s", base_out.resolve())
 
-    # Save ablated concept list
+    # Save ablated concept list and attr_arrays (for post-hoc summary plots).
     ablated_concepts_df.to_csv(base_out / "ablated_concepts.csv", index=False)
+    np.savez_compressed(
+        base_out / "attr_arrays.npz",
+        **{k: v.astype(str) for k, v in attr_arrays.items()},
+    )
     logger.info(
         "Ablated concepts saved (%d concepts, top spec=%.4f)",
         len(ablated_indices), float(ablated_concepts_df[spec_col].iloc[0]),
@@ -975,12 +985,15 @@ def main() -> None:
         _plot_tpr_disparity_comparison(pair, pathology_cols, comp_dir)
         for attr in attr_arrays:
             _plot_tpr_by_group_comparison(pair, attr, pathology_cols, comp_dir)
-        _plot_roc_comparison(
-            pair, args.pathology, args.attr, target_p_idx, attr_arrays, comp_dir
-        )
-        _plot_roc_focused_comparison(
-            res_a, res, args.pathology, args.attr, target_p_idx, attr_arrays, comp_dir
-        )
+
+        # ROC comparison plots for every pathology, not just the target.
+        roc_comp_dir = comp_dir / "roc_curves"
+        roc_comp_dir.mkdir(exist_ok=True)
+        for p_idx, pathology in enumerate(pathology_cols):
+            _plot_roc_comparison(pair, pathology, args.attr, p_idx, attr_arrays, roc_comp_dir)
+            _plot_roc_focused_comparison(
+                res_a, res, pathology, args.attr, p_idx, attr_arrays, roc_comp_dir
+            )
         logger.info("  Comparison plots → %s/vs_baseline/", res.name)
 
     # ── Summary print ──────────────────────────────────────────────────────────
