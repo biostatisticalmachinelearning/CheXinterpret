@@ -293,7 +293,6 @@ def _plot_auroc(auroc_df: pd.DataFrame, output_dir: Path) -> None:
     fig, ax = plt.subplots(figsize=(9, max(4, len(df) * 0.45)))
     bars = ax.barh(df["pathology"], df["auroc"], color="#4C78A8", height=0.6)
     ax.axvline(0.5, color="grey", linestyle="--", linewidth=0.8, label="Chance (0.5)")
-    ax.axvline(0.7, color="#F58518", linestyle=":", linewidth=0.8, label="AUROC = 0.70")
     ax.set_xlabel("AUROC (validation set)")
     ax.set_title(
         "Linear Separability of CheXagent Embeddings\n"
