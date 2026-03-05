@@ -241,6 +241,12 @@ def main() -> None:
     macro_auroc = auroc_df["auroc"].dropna().mean()
     logger.info("Macro AUROC across %d pathologies: %.3f", auroc_df["auroc"].notna().sum(), macro_auroc)
 
+    # Overall TPR per pathology (across all validation patients, no subgroup split)
+    overall_tpr: dict[str, float | None] = {
+        pathology: compute_tpr(y_valid[:, p_idx], y_scores[:, p_idx], args.threshold)
+        for p_idx, pathology in enumerate(pathology_cols)
+    }
+
     # ── TPR by group ──────────────────────────────────────────────────────────
     logger.info("Computing TPR per subgroup…")
     tpr_df = build_tpr_table(y_valid, y_scores, pathology_cols, attr_arrays, args.threshold)
@@ -263,7 +269,7 @@ def main() -> None:
     _plot_auroc(auroc_df, output_dir)
     _plot_tpr_disparity_heatmap(disparity_df, pathology_cols, output_dir)
     for attr in attr_arrays:
-        _plot_tpr_by_group(tpr_df, attr, pathology_cols, output_dir)
+        _plot_tpr_by_group(tpr_df, attr, pathology_cols, overall_tpr, output_dir)
 
     logger.info("Plotting ROC curves (one figure per pathology)…")
     roc_dir = output_dir / "roc_curves"
@@ -343,6 +349,7 @@ def _plot_tpr_by_group(
     tpr_df: pd.DataFrame,
     attribute: str,
     pathology_cols: list[str],
+    overall_tpr: dict[str, float | None],
     output_dir: Path,
 ) -> None:
     df = tpr_df[(tpr_df["attribute"] == attribute) & tpr_df["tpr"].notna()].copy()
@@ -357,13 +364,24 @@ def _plot_tpr_by_group(
 
     fig, ax = plt.subplots(figsize=(max(10, n_path * 0.9), 5))
     x = np.arange(n_path)
-    width = min(0.8 / n_groups, 0.25)
+    # Reserve one slot for the Overall bar at the start of each cluster
+    n_slots = n_groups + 1
+    width = min(0.8 / n_slots, 0.22)
     palette = sns.color_palette("tab10", n_groups)
 
+    # Overall bar (grey, hatched) — leftmost in each cluster
+    overall_vals = [overall_tpr.get(p) for p in pathologies]
+    overall_offset = (-(n_slots - 1) / 2) * width
+    ax.bar(
+        x + overall_offset, overall_vals, width,
+        label="Overall", color="#888888", alpha=0.9, hatch="//", edgecolor="white",
+    )
+
+    # Per-group bars
     for i, group in enumerate(groups):
         grp = df[df["group"] == group].set_index("pathology")["tpr"]
         tprs = [grp.get(p, float("nan")) for p in pathologies]
-        offset = (i - (n_groups - 1) / 2) * width
+        offset = (i + 1 - (n_slots - 1) / 2) * width
         ax.bar(x + offset, tprs, width, label=str(group), color=palette[i], alpha=0.85)
 
     ax.set_xticks(x)
