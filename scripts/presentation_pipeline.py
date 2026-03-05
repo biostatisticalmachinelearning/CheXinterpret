@@ -268,6 +268,18 @@ def main() -> None:
     for attr in attr_arrays:
         _plot_tpr_by_group(tpr_df, attr, pathology_cols, output_dir)
 
+    logger.info("Plotting ROC curves (one figure per pathology)…")
+    roc_dir = output_dir / "roc_curves"
+    roc_dir.mkdir(exist_ok=True)
+    for p_idx, pathology in enumerate(pathology_cols):
+        _plot_roc_for_pathology(
+            y_valid=y_valid[:, p_idx],
+            y_score=y_scores[:, p_idx],
+            pathology=pathology,
+            attr_arrays=attr_arrays,
+            output_dir=roc_dir,
+        )
+
     logger.info("Done. All outputs in %s", output_dir.resolve())
 
 
@@ -373,6 +385,80 @@ def _plot_tpr_by_group(
     fig.savefig(path, dpi=150)
     plt.close(fig)
     logger.info("Saved → %s", path)
+
+
+def _plot_roc_for_pathology(
+    y_valid: np.ndarray,
+    y_score: np.ndarray,
+    pathology: str,
+    attr_arrays: dict[str, np.ndarray],
+    output_dir: Path,
+) -> None:
+    """One figure per pathology: 2×2 subplots, one per sensitive attribute.
+
+    Each subplot shows the overall ROC curve (black) plus per-group ROC curves
+    (coloured), with AUROC values in the legend.
+    """
+    from sklearn.metrics import roc_curve
+
+    if len(np.unique(y_valid)) < 2:
+        logger.debug("Skipping ROC plot for %s — only one class in validation set.", pathology)
+        return
+
+    attrs = list(attr_arrays.items())
+    n_attrs = len(attrs)
+    n_cols = 2
+    n_rows = (n_attrs + 1) // 2
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols * 5, n_rows * 4.5), squeeze=False)
+    fig.suptitle(f"ROC Curves — {pathology}", fontsize=13, fontweight="bold", y=1.01)
+
+    overall_fpr, overall_tpr, _ = roc_curve(y_valid, y_score)
+    overall_auroc = float(roc_auc_score(y_valid, y_score))
+
+    for ax_idx, (attr_name, attr_values) in enumerate(attrs):
+        ax = axes[ax_idx // n_cols][ax_idx % n_cols]
+
+        # Overall ROC
+        ax.plot(
+            overall_fpr, overall_tpr,
+            color="black", linewidth=2, linestyle="--",
+            label=f"Overall (AUC={overall_auroc:.3f})",
+            zorder=5,
+        )
+
+        # Per-group ROC curves
+        groups = sorted(np.unique(attr_values[~pd.isna(attr_values)]))
+        palette = sns.color_palette("tab10", len(groups))
+        for color, group_val in zip(palette, groups):
+            mask = attr_values == group_val
+            y_g = y_valid[mask]
+            s_g = y_score[mask]
+            if len(np.unique(y_g)) < 2 or (y_g == 1).sum() < MIN_POSITIVES:
+                continue
+            fpr_g, tpr_g, _ = roc_curve(y_g, s_g)
+            auc_g = float(roc_auc_score(y_g, s_g))
+            ax.plot(fpr_g, tpr_g, color=color, linewidth=1.5,
+                    label=f"{group_val} (AUC={auc_g:.3f})")
+
+        ax.plot([0, 1], [0, 1], color="lightgrey", linewidth=0.8, linestyle=":")
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1.02)
+        ax.set_xlabel("False Positive Rate", fontsize=9)
+        ax.set_ylabel("True Positive Rate", fontsize=9)
+        ax.set_title(attr_name.replace("_", " ").title(), fontsize=10)
+        ax.legend(fontsize=7, loc="lower right")
+
+    # Hide any unused subplots
+    for ax_idx in range(n_attrs, n_rows * n_cols):
+        axes[ax_idx // n_cols][ax_idx % n_cols].set_visible(False)
+
+    fig.tight_layout()
+    safe_name = pathology.replace(" ", "_").replace("/", "-")
+    path = output_dir / f"roc_{safe_name}.png"
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    logger.info("  Saved ROC → %s", path.name)
 
 
 if __name__ == "__main__":
