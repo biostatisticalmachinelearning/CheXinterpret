@@ -116,7 +116,158 @@ Default behavior is comprehensive:
 chex-run-study --config configs/default.yaml --single-sae
 ```
 
-## 3.5 Publication pipelines
+## 3.5 Standalone Analysis Scripts
+
+These three scripts form a sequential fairness-audit pipeline that operates on
+a pre-extracted feature bundle (`features.npz`).  Run them in order after
+feature extraction has completed (or after `chex-run-study` has produced
+`features.npz`).
+
+### Stage 1 — Presentation pipeline (baseline audit)
+
+```bash
+python scripts/presentation_pipeline.py --config configs/default.yaml
+# Optional flags:
+#   --output-dir /path/to/dir   override output location
+#   --threshold 0.5             decision threshold for TPR (default 0.5)
+#   --max-iter 1000             logistic regression solver iterations
+```
+
+**What it does:**
+
+1. Loads the feature bundle from `<output_root>/features.npz`.
+2. Fits a `StandardScaler` on training-split embeddings.
+3. Trains one binary logistic regression (L2, lbfgs, C=1) **per pathology**
+   on the training split.
+4. Evaluates each probe on the **validation split** only, reporting:
+   - Per-pathology AUROC ("linear separability" of the raw embeddings).
+   - Sensitivity (TPR) at the chosen threshold, broken down by sex, age group,
+     race, and insurance type.
+5. Derives per-(pathology, attribute) TPR disparity = max_group TPR − min_group TPR.
+
+**Outputs** (written to `<output_root>/presentation/`):
+
+| File | Description |
+|------|-------------|
+| `linear_separability.csv` | AUROC, prevalence, n_positive, n_valid per pathology |
+| `tpr_by_group.csv` | TPR per pathology × attribute × group |
+| `tpr_disparity.csv` | max−min TPR disparity per pathology × attribute |
+| `auroc_per_pathology.png` | Horizontal bar chart; bars annotated with (pos=, n=) |
+| `tpr_disparity_heatmap.png` | Heatmap of TPR disparity (pathologies × attributes) |
+| `tpr_by_<attribute>.png` | Clustered bar chart per attribute; Overall + per-group bars; n_positive annotated |
+| `roc_curves/roc_<pathology>.png` | 2×2 grid of ROC curves — one subplot per attribute, overall (dashed) + per-group coloured curves, AUC/n in legend |
+
+---
+
+### Stage 2 — SAE concept analysis
+
+```bash
+python scripts/concept_analysis_pipeline.py --config configs/default.yaml
+# Optional flags:
+#   --output-dir /path/to/dir   override output location
+#   --skip-interventions        stop after grid analysis, skip running interventions
+```
+
+**What it does:**
+
+1. Loads the same feature bundle and extracts train-split embeddings.
+2. Creates an internal 10 % hold-out from the **training split** (only) for
+   SAE early stopping — the true validation split is never touched during training.
+3. Trains a **4 × 5 grid of 20 TopK SAEs**:
+   - *k* (number of active latents) ∈ {8, 16, 32, 64}
+   - *latent_dim* ∈ {256, 512, 1024, 2048, 4096}
+4. For each SAE, encodes the **training split** and computes **eta-squared
+   (η²)** — the fraction of concept-activation variance explained by a
+   grouping variable — for every (latent, target) pair where target is one of
+   the 4 demographic attributes or one of the 14 pathologies.
+5. Computes **per-pair specificity** for every (latent, attr, pathology):
+
+   ```
+   spec(latent, attr, path) = demo_η²_attr(latent) − path_η²_path(latent)
+   ```
+
+   A high-specificity concept activates strongly along demographic lines while
+   remaining uninformative about pathology — the ideal fairness confound.
+6. Selects the best (k, latent_dim) architecture per (attr, pathology) pair
+   and saves this to `best_sae_per_pair.csv`.
+7. Runs all **56 targeted fairness interventions** (one per (attr × pathology)
+   pair) by invoking Stage 3 as a subprocess for each pair.
+8. After all 56 pairs complete, generates 14 **summary ROC figures** — one per
+   pathology — where each figure has 4 demographic quadrants, each drawn from
+   the intervention that specifically targeted that (attr, pathology) pair.
+
+**Outputs** (written to `<output_root>/presentation/sae-eval/`):
+
+| Location | File | Description |
+|----------|------|-------------|
+| `k<k>_d<dim>/` | `concept_scores.csv` | Full η² + specificity table per latent |
+| | `pair_overview.png` | Heatmap: max single-concept specificity per (attr, path) pair |
+| | `activation_dist_<attr>.png` | Box plots of top-5 demo concepts: activation by group (pos vs neg) |
+| | `activation_dist_pathology_<sae>.png` | Top-5 pathology concepts by path_η²: pos-vs-neg activation distributions |
+| | `per_pair/top10_<attr>_<path>.png` | Top-10 concepts for each pair: 3-bar clusters (demo η², path η², specificity) |
+| `grid/` | `grid_summary.csv` | One row per SAE: mean specificity per (attr, path) pair |
+| | `best_sae_per_pair.csv` | Best (k, latent_dim) for every (attr, path) pair |
+| | `best_sae_heatmap.png` | (attr × path) heatmap: best architecture name |
+| | `specificity_heatmap.png` | k × dim grid coloured by mean pair-specificity |
+| | `scatter_demo_vs_path.png` | Mean demo_η² vs mean path_η² per SAE |
+| | `pair_heatmaps/spec_<attr>_<path>.png` | k × dim specificity grid per pair |
+| `interventions/` | *(see Stage 3)* | One subdirectory per targeted pair |
+| `interventions/summary/` | `roc_summary_<pathology>.png` | 14 summary ROC figures (4-quadrant, per-pair targeted ROC curves) |
+
+---
+
+### Stage 3 — Targeted fairness intervention
+
+Stage 3 is invoked automatically by Stage 2 for all 56 pairs.  It can also be
+run standalone for a single (attr, pathology) pair:
+
+```bash
+python scripts/fairness_intervention.py \
+    --config configs/default.yaml \
+    --attr sex \
+    --pathology "Pleural Effusion" \
+    --threshold 0.02    # fraction of concepts to ablate
+```
+
+**What it does:**
+
+1. Loads the feature bundle and the best SAE checkpoint for the target
+   (attr, pathology) pair (identified from `best_sae_per_pair.csv`).
+2. Ranks all SAE latents by their **specificity score** for the target pair.
+3. **Mean-ablates** the top-specificity concepts: replaces their activations
+   with the training-set mean for every split (train + validation).
+4. Evaluates three conditions on the **validation split**:
+   - **Baseline** — original embeddings, original logistic regression.
+   - **Ablated** — ablated embeddings, original logistic regression (same
+     weights, just fed different inputs).
+   - **Retrained** — ablated embeddings, logistic regression retrained from
+     scratch on the ablated training-split embeddings.
+5. Reports AUROC, TPR, and ROC curves for all three conditions and all four
+   sensitive attributes simultaneously.
+6. Saves `scores.npz` (y_valid, y_scores) and `attr_arrays.npz` per condition
+   so Stage 2 can aggregate them into summary ROC figures without re-running.
+
+**Outputs** (written to `interventions/<attr>_<pathology>_t<threshold>/`):
+
+| Location | File | Description |
+|----------|------|-------------|
+| `<pair>/` | `ablated_concepts.csv` | Ranked list of ablated latents with η² and specificity |
+| | `attr_arrays.npz` | Demographic arrays for the validation split |
+| `baseline/` | `linear_separability.csv` | Per-pathology AUROC (baseline condition) |
+| | `tpr_by_group.csv` | Per-pathology × attr × group TPR |
+| | `scores.npz` | Raw y_valid and y_scores (for post-hoc ROC plots) |
+| | `roc_curves/roc_<pathology>.png` | Per-pathology ROC — overall + per-group |
+| `ablated/` | *(same structure)* | Ablated condition |
+| `retrained/` | *(same structure)* | Retrained condition |
+| `vs_baseline/` | `auroc_comparison.png` | AUROC bar comparison: all 3 conditions |
+| | `tpr_disparity_comparison.png` | TPR disparity comparison across conditions |
+| | `tpr_by_<attr>_comparison.png` | Paired bars: baseline vs ablated/retrained per group |
+| | `roc_curves/roc_<pathology>_comparison.png` | 4-quadrant ROC comparison (all attrs) |
+| | `roc_curves/roc_<pathology>_focused.png` | Zoomed focused ROC for the target pathology |
+
+---
+
+## 3.6 Publication pipelines
 
 ```bash
 chex-init-paper-config --output configs/publication.yaml
