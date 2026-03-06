@@ -929,7 +929,7 @@ def main() -> None:
         x_ablated_train = decode_features(sae, z_train_ablated, device)
 
     # ── Set up output directories ──────────────────────────────────────────────
-    tag = f"{safe_attr}_{safe_path}_t{args.threshold:.3f}"
+    tag = f"{safe_attr}_{safe_path}_t{args.threshold:.4g}"
     base_out = (
         Path(args.output_dir) if args.output_dir
         else cfg.output_root / "presentation" / "intervention" / tag

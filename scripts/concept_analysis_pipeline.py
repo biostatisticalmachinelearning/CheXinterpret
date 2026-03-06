@@ -114,6 +114,18 @@ def parse_args() -> argparse.Namespace:
         help="Skip the 56-intervention runner at the end (default: interventions run)",
     )
     parser.add_argument(
+        "--thresholds",
+        nargs="+",
+        type=float,
+        default=[0.02],
+        metavar="T",
+        help=(
+            "One or more pair-specificity thresholds for concept ablation. "
+            "Each threshold runs all (attr, pathology) pairs into a separate "
+            "t{threshold}/ subdirectory. (default: 0.02)"
+        ),
+    )
+    parser.add_argument(
         "--specificity-mode",
         default=None,
         choices=["eta2", "conditional_auc"],
@@ -896,7 +908,11 @@ def _plot_demo_vs_path_scatter(grid_results: list[dict], grid_out: Path) -> None
 # ── Intervention runner ────────────────────────────────────────────────────────
 
 def _run_all_interventions(cfg, base_out: Path, args: argparse.Namespace) -> None:
-    """Run fairness_intervention.py for every (attr, pathology) pair in best_sae_per_pair.csv."""
+    """Run fairness_intervention.py for every (attr, pathology) pair × threshold.
+
+    Each threshold gets its own subdirectory inside the mode-specific interventions
+    folder:  interventions[-<mode>]/t{threshold}/{attr}_{path}_t{threshold}/
+    """
     import subprocess
 
     grid_out = base_out / "grid"
@@ -908,41 +924,53 @@ def _run_all_interventions(cfg, base_out: Path, args: argparse.Namespace) -> Non
     best_df = pd.read_csv(best_csv)
     pairs = list(best_df[["attr", "pathology"]].drop_duplicates().itertuples(index=False))
     n_pairs = len(pairs)
-    logger.info("Running interventions for all %d (attr, pathology) pairs…", n_pairs)
 
     intervention_script = Path(__file__).parent / "fairness_intervention.py"
-    # Keep interventions from different modes in separate sibling directories
     spec_mode = getattr(args, "specificity_mode", None) or "eta2"
     if spec_mode == "eta2":
-        interventions_out = base_out.parent / "interventions"
+        interventions_base = base_out.parent / "interventions"
     else:
-        interventions_out = base_out.parent / f"interventions-{spec_mode.replace('_', '-')}"
+        interventions_base = base_out.parent / f"interventions-{spec_mode.replace('_', '-')}"
 
-    for i, row in enumerate(pairs):
-        attr = row.attr
-        pathology = row.pathology
-        logger.info("  [%d/%d] %s × %s", i + 1, n_pairs, attr, pathology)
-        cmd = [
-            sys.executable, str(intervention_script.resolve()),
-            "--config", str(Path(args.config).resolve()),
-            "--attr", attr,
-            "--pathology", pathology,
-            "--sae-dir", str(base_out.resolve()),
-            "--output-dir", str(interventions_out.resolve()),
-            "--specificity-mode", spec_mode,
-            "--lr-mode", "both",
-            "--threshold", "0.02",
-        ]
-        result = subprocess.run(cmd, check=False)
-        if result.returncode != 0:
-            logger.warning(
-                "  [%d/%d] FAILED (exit %d): %s × %s — "
-                "check threshold or concept_scores.csv for this pair.",
-                i + 1, n_pairs, result.returncode, attr, pathology,
-            )
+    thresholds: list[float] = list(getattr(args, "thresholds", [0.02]))
+    logger.info(
+        "Running interventions: %d pairs × %d thresholds = %d runs…",
+        n_pairs, len(thresholds), n_pairs * len(thresholds),
+    )
+
+    for threshold in thresholds:
+        t_str = f"{threshold:.4g}"
+        interventions_out = interventions_base / f"t{t_str}"
+        interventions_out.mkdir(parents=True, exist_ok=True)
+        logger.info("── Threshold %s → %s", t_str, interventions_out)
+
+        for i, row in enumerate(pairs):
+            attr = row.attr
+            pathology = row.pathology
+            logger.info("  [t=%s %d/%d] %s × %s", t_str, i + 1, n_pairs, attr, pathology)
+            cmd = [
+                sys.executable, str(intervention_script.resolve()),
+                "--config", str(Path(args.config).resolve()),
+                "--attr", attr,
+                "--pathology", pathology,
+                "--sae-dir", str(base_out.resolve()),
+                "--output-dir", str(interventions_out.resolve()),
+                "--specificity-mode", spec_mode,
+                "--lr-mode", "both",
+                "--threshold", t_str,
+            ]
+            result = subprocess.run(cmd, check=False)
+            if result.returncode != 0:
+                logger.warning(
+                    "  [t=%s %d/%d] FAILED (exit %d): %s × %s — "
+                    "no concepts exceeded threshold (max specificity too low).",
+                    t_str, i + 1, n_pairs, result.returncode, attr, pathology,
+                )
+
+        logger.info("Threshold %s complete. Generating summary ROC…", t_str)
+        _generate_intervention_summary_roc(interventions_out, pairs, t_str)
 
     logger.info("All interventions complete.")
-    _generate_intervention_summary_roc(interventions_out, pairs, "0.02")
 
 
 def _generate_intervention_summary_roc(
