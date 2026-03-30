@@ -25,6 +25,7 @@ dependencies = [
   "seaborn>=0.13",
   "rich>=13.7",
   "accelerate>=1.0",
+  "optuna>=3.0",
 ]
 
 [project.optional-dependencies]
@@ -43,6 +44,8 @@ chex-audit-data = "chex_sae_fairness.cli:audit_data_cli"
 chex-run-core-paper = "chex_sae_fairness.cli:run_core_publication_cli"
 chex-run-supplement-paper = "chex_sae_fairness.cli:run_supplement_publication_cli"
 chex-init-paper-config = "chex_sae_fairness.cli:init_publication_config_cli"
+cnn-train = "cnn_baseline.cli:train_cli"
+cnn-sweep = "cnn_baseline.cli:sweep_cli"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

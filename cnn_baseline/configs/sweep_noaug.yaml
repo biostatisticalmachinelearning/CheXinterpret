@@ -1,0 +1,62 @@
+seed: 42
+
+paths:
+  manifest_csv: "outputs/default/runs/20260305_040702/workspace/manifest_cached256.csv"
+  image_root: "/home/little/chexpert256"
+  output_root: "cnn_baseline/outputs/sweep_noaug"
+
+data:
+  split_col: "split"
+  pathology_cols:
+    - "No Finding"
+    - "Enlarged Cardiomediastinum"
+    - "Cardiomegaly"
+    - "Lung Opacity"
+    - "Lung Lesion"
+    - "Edema"
+    - "Consolidation"
+    - "Pneumonia"
+    - "Atelectasis"
+    - "Pneumothorax"
+    - "Pleural Effusion"
+    - "Pleural Other"
+    - "Fracture"
+    - "Support Devices"
+  sensitive_attrs:
+    - "sex"
+    - "age_group"
+    - "race"
+    - "insurance_type"
+  image_size: 224
+  num_workers: 4
+  pin_memory: true
+  augmentation_level: "none"   # overridden per-trial (fixed to none)
+  max_rows_per_split: null
+
+train:
+  architecture: "convnext_small"  # overridden per-trial
+  pretrained: true
+  batch_size: 32
+  lr: 1.0e-4
+  weight_decay: 1.0e-5
+  epochs: 15
+  patience: 4
+  warmup_epochs: 2
+  amp: true
+  grad_clip: 1.0
+  pos_weight_mode: "auto"
+
+sweep:
+  n_trials: 12       # 4 archs × 3 LR variants
+  sampler: "tpe"
+  architectures:
+    - "densenet121"
+    - "resnet50"
+    - "efficientnet_b4"
+    - "convnext_small"
+  lr_low: 5.0e-5
+  lr_high: 5.0e-4
+  batch_sizes: [32]
+  weight_decays: [1.0e-6, 1.0e-5, 1.0e-4]
+  augmentation_levels: ["none"]   # no augmentation
+  image_sizes: [224]

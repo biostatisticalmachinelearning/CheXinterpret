@@ -1,0 +1,62 @@
+seed: 42
+
+paths:
+  manifest_csv: "outputs/default/runs/20260305_040702/workspace/manifest_cached256.csv"
+  image_root: "/home/little/chexpert256"
+  output_root: "cnn_baseline/outputs/sweep_quick"
+
+data:
+  split_col: "split"
+  pathology_cols:
+    - "No Finding"
+    - "Enlarged Cardiomediastinum"
+    - "Cardiomegaly"
+    - "Lung Opacity"
+    - "Lung Lesion"
+    - "Edema"
+    - "Consolidation"
+    - "Pneumonia"
+    - "Atelectasis"
+    - "Pneumothorax"
+    - "Pleural Effusion"
+    - "Pleural Other"
+    - "Fracture"
+    - "Support Devices"
+  sensitive_attrs:
+    - "sex"
+    - "age_group"
+    - "race"
+    - "insurance_type"
+  image_size: 224      # fixed at 224 for sweep — EfficientNet-B4 OOMs at 320px on 7GB
+  num_workers: 4   # NVMe cache — more workers fine (no seek contention)
+  pin_memory: true
+  augmentation_level: "medium"  # overridden per-trial
+  max_rows_per_split: null     # use full dataset now that images are cached on NVMe
+
+train:
+  architecture: "densenet121"  # overridden per-trial
+  pretrained: true
+  batch_size: 32               # overridden per-trial
+  lr: 1.0e-4                   # overridden per-trial
+  weight_decay: 1.0e-5         # overridden per-trial
+  epochs: 15         # short budget per trial; best config retrained fully after sweep
+  patience: 4
+  warmup_epochs: 2
+  amp: true
+  grad_clip: 1.0
+  pos_weight_mode: "auto"
+
+sweep:
+  n_trials: 16        # 4 archs × ~4 trials each on average with TPE
+  sampler: "tpe"
+  architectures:
+    - "densenet121"
+    - "resnet50"
+    - "efficientnet_b4"
+    - "convnext_small"
+  lr_low: 5.0e-5
+  lr_high: 5.0e-4
+  batch_sizes: [32]   # fixed — bs=16 doubles steps/epoch without proportional benefit
+  weight_decays: [1.0e-6, 1.0e-5, 1.0e-4]
+  augmentation_levels: ["light", "medium", "heavy"]
+  image_sizes: [224]   # constrained — 320px OOMs for EfficientNet-B4 on 7GB GPU
